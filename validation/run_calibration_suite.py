@@ -126,7 +126,6 @@ def main() -> int:
         )
     )
 
-    # Tensor external golden. Existing validators return 2 if SCALE-Sim is absent.
     steps.append(
         run_step(
             "L1a",
@@ -150,8 +149,6 @@ def main() -> int:
         )
     )
 
-    # Always export a deterministic CModel RTL contract. If a real trace is
-    # supplied, it is used; otherwise an 8x8 zero-offset microcase is exported.
     cmodel_rtl_csv = out / "spn_cmodel_vectors.csv"
     export_cmd = [
         py,
