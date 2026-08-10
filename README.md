@@ -1,17 +1,8 @@
 # SPN Accelerator CModel
 
-A dependency-light architectural simulator for exploring **generic NPU tensor execution plus spatial propagation network (SPN) acceleration**. The first target is the CompletionFormer/NLSPN hot path, with CSPN and DySPN intended to share the same propagation abstraction.
+A tile/event-level architectural simulator for exploring **generic NPU tensor execution plus spatial propagation network (SPN) acceleration**. The first target is the CompletionFormer/NLSPN hot path, with CSPN and DySPN intended to share the same propagation abstraction.
 
-## Why this simulator exists
-
-Dense Conv/GEMM and SPN propagation stress different hardware resources:
-
-- Dense operators are regular and map naturally to a systolic/tensor array with explicit DMA and scratchpad tiling.
-- NLSPN-style propagation is metadata-driven: offsets generate irregular addresses, each deformable neighbor performs four-point bilinear sampling, and affinity-weighted reduction repeats over an on-chip depth state.
-
-A single `MACs / peak` estimator cannot represent DMA overlap, array wavefronts, SRAM capacity, SPN bank conflicts, or iterative state residency. This CModel therefore uses **tile/packet-level event timing** and exposes replaceable backends for external validation tools.
-
-## Modeled architecture
+## Architecture
 
 ```text
                     Command / schedule
@@ -30,140 +21,151 @@ A single `MACs / peak` estimator cannot represent DMA overlap, array wavefronts,
                         DRAM*
 ```
 
-`*` VPU and cycle-accurate DRAM/NoC backends are extension points in the MVP. Tensor compute and SPN propagation are implemented now.
+`AnalyticalSystolicBackend` models array waves, fill/drain, Conv tiling, DMA overlap, ABUF/WBUF/PBUF capacity and utilization. `SPNEngine` models packetized `AGU -> banked gather -> bilinear -> affinity/reduction`, including real address traces and SRAM-bank conflicts. The default 128x128 INT16 NLSPN scratchpad budget is 512 KiB offset + 256 KiB affinity + 64 KiB depth ping-pong.
 
-## Current timing models
+## Reproducible third-party stack
 
-### Tensor engine
+External architecture tools used by calibration and DSE are pinned under `third_party/` as git submodules:
 
-`AnalyticalSystolicBackend` lowers a Conv tile to GEMM `(M=OH*OW, K=Kh*Kw*Cin, N=Cout)` and models array-sized M/N waves. Each wave includes K steady-state work plus systolic fill/drain. The system layer additionally models:
+| Module | Role |
+|---|---|
+| SCALE-Sim v3 | tensor-array cycle/traffic golden |
+| Ramulator2 | DDR/HBM cycle-level timing |
+| BookSim2 | NoC contention |
+| Accelergy | action-count energy framework |
+| HWComponents | component-model stack |
+| HWComponents-CACTI | CACTI-backed SRAM/cache/DRAM models; recursively pulls CACTI |
+| Timeloop | optional mapper/tiling cross-validation |
 
-- activation/weight/output DMA bytes and setup cost;
-- two-channel DMA contention;
-- double-buffer reuse constraints;
-- ABUF/WBUF/PBUF capacity checks;
-- tile-level compute/DMA overlap;
-- MAC utilization and traffic statistics.
+Exact upstream commits are recorded in `third_party/manifest.json`. Reported experiments must not use `git submodule update --remote`.
 
-The backend interface is deliberately replaceable by SCALE-Sim or a calibrated lookup table.
+## One-shot local setup
 
-### SPN engine
-
-`SPNEngine` packetizes pixels and pipelines:
-
-```text
-AGU -> banked state-SRAM gather -> bilinear interpolation -> affinity/reduction
-```
-
-For a deformable 3x3 NLSPN step, each pixel performs one center read plus `4 * 8` bilinear source reads. Offset metadata is reused across propagation iterations; depth state stays in ping-pong SRAM. Gather timing consumes an actual scalar address trace and keeps per-bank queues across issue cycles, so hot-bank conflicts become explicit stall cycles instead of an average bandwidth penalty.
-
-The baseline 128x128 INT16 metadata/state footprint is exactly:
-
-- offset: 512 KiB;
-- eight affinities: 256 KiB;
-- depth ping-pong: 64 KiB.
-
-The default config therefore uses 768 KiB metadata SRAM plus 64 KiB state SRAM.
-
-## Quick start
-
-No third-party Python dependencies are required.
+Clone the development branch with its pinned dependencies:
 
 ```bash
-python -m unittest discover -s tests -v
+git clone --branch agent/add-architectural-cmodel --recurse-submodules \
+  https://github.com/DingdongD/SPN_Accelerator.git
+cd SPN_Accelerator
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[validation]'
+
+bash third_party/bootstrap.sh
+python third_party/check.py
+```
+
+Equivalent Makefile path:
+
+```bash
+make setup
+make check-third-party
+```
+
+If the repository was cloned without submodules:
+
+```bash
+git submodule sync --recursive
+git submodule update --init --recursive
+bash third_party/bootstrap.sh
+```
+
+`bootstrap.sh` installs SCALE-Sim, Accelergy and HWComponents editable into the active venv, builds/installs Ramulator2, and builds BookSim2. Timeloop source is initialized but not built automatically because its upstream build additionally requires system ISL/Barvinok dependencies.
+
+See `third_party/README.md` for `--init-only`, `--no-build`, pin verification and update policy.
+
+## Smoke test
+
+```bash
+make test
 PYTHONPATH=. python examples/run_dec2_nlspn.py
-PYTHONPATH=. python -m spn_accel_cmodel.cli \
-  --config configs/baseline.json \
-  --prop-steps 12 \
-  --offset-pattern zero
-```
-
-SPN bank/gather sweep:
-
-```bash
 PYTHONPATH=. python examples/sweep_spn.py
 ```
 
-## Validation quick start
+Representative workload:
 
-The repository now contains an executable staged validation chain instead of placeholder hooks:
+1. CompletionFormer `dec2` 3x3 Conv `160 -> 32` at 128x128;
+2. two residual 3x3 Conv `32 -> 32` at 128x128;
+3. deformable 8-neighbor NLSPN for configurable propagation steps.
+
+The current baseline result is an **architecture-model prediction**, not a calibrated silicon claim.
+
+## Validation chain
 
 ```text
-PyTorch functional semantics
-        -> real CompletionFormer offset/affinity trace
-        -> CModel address/bank trace
-        -> SPN RTL exact-vector comparison
+PyTorch / CompletionFormer trace
+          |
+          +--> NumPy SPN functional golden ---- output-value check
+          |
+          +--> CModel real-address SPN trace -- address/bank/cycle check
 
-Tensor CModel
-        -> SCALE-Sim GEMM compute validation
-        -> SCALE-Sim Conv cycle + traffic validation
-
-Subgraph CModel
-        -> normalized ACTSim/board JSON comparison
+Tensor CModel ----> SCALE-Sim GEMM/Conv -------- compute/traffic check
+SPN CModel -------> RTL vector contract -------- address/bank exact check
+Subgraph CModel --> ACTSim / board JSON -------- latency/traffic check
 ```
 
-Install only the optional local validation dependency:
+Run every locally available gate:
 
 ```bash
-python -m pip install -e '.[validation]'
-python -m unittest discover -s tests -v
+make calibrate
 ```
 
-Run the staged local calibration suite:
+Once real SPN/RTL/ACTSim/board goldens are supplied:
 
 ```bash
-PYTHONPATH=. python validation/run_calibration_suite.py
+make calibrate-strict
 ```
 
-The runner records the git revision/environment, executes all locally available gates, and marks external-golden stages as `SKIP` when SCALE-Sim/RTL/ACTSim/board data is absent. Re-run with `--strict` once all external goldens are present.
-
-Tensor-array cross-checks (requires SCALE-Sim installed in that environment):
+Useful direct commands:
 
 ```bash
 PYTHONPATH=. python validation/validate_tensor_scalesim.py
 PYTHONPATH=. python validation/validate_conv_scalesim.py
-```
 
-Run a real CompletionFormer/NLSPN offset trace:
-
-```bash
 PYTHONPATH=. python validation/validate_spn_trace.py trace.npz \
-  --offset-key offset --steps 12
-```
+  --offset-key offset --affinity-key aff \
+  --state-key pred_init --golden-key pred --steps 12
 
-Generate/compare the exact SPN RTL gather contract:
-
-```bash
 PYTHONPATH=. python validation/export_spn_rtl_vectors.py \
-  --height 16 --width 16 --out validation/out/spn_vectors.csv
+  --trace-npz trace.npz --offset-key offset \
+  --out validation/out/spn_vectors.csv
+
 PYTHONPATH=. python validation/compare_spn_rtl_trace.py \
   validation/out/spn_vectors.csv rtl_vectors.csv
 ```
 
-See [`CALIBRATION_PLAN.md`](CALIBRATION_PLAN.md) for the calibration/hold-out matrix, parameter-fitting order, and acceptance thresholds. See [`validation/README.md`](validation/README.md) for semantic assumptions, report schemas, and ACTSim/board calibration boundaries. The presence of these adapters does **not** mean SCALE-Sim/RTL/ACTSim accuracy has already been measured; an external golden must be supplied and the generated report must pass.
+See `CALIBRATION_PLAN.md` for calibration/hold-out splits, fitting order and quantitative gates. See `validation/README.md` for semantic assumptions and external-golden schemas.
 
-## CompletionFormer representative workload
+## Calibration boundary
 
-`completionformer_dec2_nlspn_workload()` currently models:
+Do not calibrate Tensor/SPN cycles to board wall time. Keep these categories separate:
 
-1. `dec2` 3x3 Conv `160 -> 32` at 128x128;
-2. two residual-block 3x3 Conv `32 -> 32` at 128x128;
-3. deformable 8-neighbor NLSPN propagation for a configurable number of steps.
+```text
+accelerator core
+DMA / modeled memory
+package/model load
+launch/runtime
+CPU glue
+quant/dequant
+CPU fallback
+```
 
-Resize is intentionally separated from the first dense model so future experiments can compare host/VPU resize against a fused Resize+Conv datapath without silently changing the Conv baseline.
+Only components represented in the architectural CModel may be used to fit CModel parameters.
 
-## External backend roadmap
+## Fidelity roadmap
 
-The repository does **not** vendor other simulators. It provides clean boundaries for:
+```text
+functional semantics
+    -> SCALE-Sim tensor calibration
+    -> SRAM/DMA/Ramulator calibration
+    -> SPN exact RTL address contract
+    -> SPN cycle calibration
+    -> ACTSim subgraphs
+    -> board subgraphs
+    -> full CompletionFormer/CSPN/NLSPN/DySPN validation
+    -> architecture DSE
+```
 
-- **SCALE-Sim**: tensor-tile cycle/traffic golden backend (`backends/scalesim.py`);
-- **Ramulator2**: timestamped DRAM request/completion backend (`backends/ramulator2.py`);
-- **BookSim2**: future multi-engine/multi-core NoC contention;
-- **CACTI/Accelergy**: future SRAM action energy/area and action-count energy model;
-- **Gemmini/NVDLA/Verilator**: selected RTL/SystemC validation points.
-
-See [`CALIBRATION_PLAN.md`](CALIBRATION_PLAN.md) and [`validation/README.md`](validation/README.md) for the staged calibration plan.
-
-## Important interpretation
-
-The current cycle numbers are **architecture-model predictions**, not measured CompletionFormer board latency. They should be used for relative DSE only until tensor, memory, and SPN microbenchmarks are calibrated against external simulators/RTL/ACTSim. Board package loading, CPU glue, quant/dequant, and software launch overhead must remain separate from accelerator-core timing.
+Ramulator2, BookSim2, Accelergy/HWComponents-CACTI and Timeloop are already pinned in `third_party/` so later fidelity stages do not require changing the source-dependency baseline.
