@@ -1,0 +1,86 @@
+{
+  "schema_version": 2,
+  "policy": "All third-party sources are pinned by gitlinks. Do not update pins implicitly during calibration.",
+  "environment": {
+    "cmodel_python_min": "3.10",
+    "full_third_party_python_min": "3.12",
+    "note": "HWComponents and HWComponents-CACTI at the pinned revisions require Python >=3.12. Use bootstrap.sh --core on Python 3.10/3.11 when energy modeling is not required."
+  },
+  "modules": [
+    {
+      "name": "SCALE-Sim",
+      "path": "third_party/SCALE-Sim",
+      "repository": "https://github.com/scalesim-project/SCALE-Sim.git",
+      "commit": "9f98c4371055a54c75209c2e02b640b897550532",
+      "nested": [
+        {
+          "name": "SCALE-Sim legacy Ramulator",
+          "path": "submodules/ramulator",
+          "repository": "https://github.com/CMU-SAFARI/ramulator.git",
+          "commit": "214f635845214adf030367939655d172ef0fed5f",
+          "role": "Internal dependency of the pinned SCALE-Sim v3 integration; distinct from the standalone Ramulator2 backend below"
+        }
+      ],
+      "role": "Tensor-array compute, SRAM/DRAM traffic and SCALE-Sim v3 calibration",
+      "tier": "core"
+    },
+    {
+      "name": "Ramulator2",
+      "path": "third_party/ramulator2",
+      "repository": "https://github.com/CMU-SAFARI/ramulator2.git",
+      "commit": "b30320bc9385b708e86b67ebb9f48858cc66d798",
+      "role": "Standalone modern cycle-level DDR/HBM controller and DRAM backend for the CModel",
+      "tier": "core"
+    },
+    {
+      "name": "BookSim2",
+      "path": "third_party/booksim2",
+      "repository": "https://github.com/booksim/booksim2.git",
+      "commit": "28f43299f1706a3160ffac721ca461d74eb6e618",
+      "role": "Cycle-accurate NoC contention for future multi-engine/multi-core simulation",
+      "tier": "core"
+    },
+    {
+      "name": "Accelergy",
+      "path": "third_party/accelergy",
+      "repository": "https://github.com/Accelergy-Project/accelergy.git",
+      "commit": "6911d15686ee7efdceba7d95605102df4472ae3a",
+      "role": "Action-count based energy-estimation framework",
+      "tier": "energy"
+    },
+    {
+      "name": "HWComponents",
+      "path": "third_party/hwcomponents",
+      "repository": "https://github.com/Accelergy-Project/hwcomponents.git",
+      "commit": "e67d7f10ee7210d265300d092d25e1b5f82dafba",
+      "python_min": "3.12",
+      "role": "Current Accelergy-Project hardware component modeling stack",
+      "tier": "energy"
+    },
+    {
+      "name": "HWComponents-CACTI",
+      "path": "third_party/hwcomponents-cacti",
+      "repository": "https://github.com/Accelergy-Project/hwcomponents-cacti.git",
+      "commit": "de2520f3febccba232fa583aeb42fd0550eb6088",
+      "python_min": "3.12",
+      "nested": [
+        {
+          "name": "CACTI 7",
+          "path": "hwcomponents_cacti/cacti",
+          "repository": "https://github.com/HewlettPackard/cacti.git",
+          "commit": "1ffd8dfb10303d306ecd8d215320aea07651e878"
+        }
+      ],
+      "role": "CACTI-backed SRAM/cache/DRAM area, latency and energy models",
+      "tier": "energy"
+    },
+    {
+      "name": "Timeloop",
+      "path": "third_party/timeloop",
+      "repository": "https://github.com/NVlabs/timeloop.git",
+      "commit": "32370826fdf1aa3c8deb0c93e6b2a2fc7cf053aa",
+      "role": "Optional mapping/tiling search and mapper cross-validation; default bootstrap does not build it because upstream requires system ISL/Barvinok",
+      "tier": "optional"
+    }
+  ]
+}

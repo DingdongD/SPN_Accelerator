@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/
+results/
+validation/out/
+validation/local_goldens/*
+!validation/local_goldens/README.md

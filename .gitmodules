@@ -1,0 +1,21 @@
+[submodule "third_party/SCALE-Sim"]
+	path = third_party/SCALE-Sim
+	url = https://github.com/scalesim-project/SCALE-Sim.git
+[submodule "third_party/ramulator2"]
+	path = third_party/ramulator2
+	url = https://github.com/CMU-SAFARI/ramulator2.git
+[submodule "third_party/booksim2"]
+	path = third_party/booksim2
+	url = https://github.com/booksim/booksim2.git
+[submodule "third_party/accelergy"]
+	path = third_party/accelergy
+	url = https://github.com/Accelergy-Project/accelergy.git
+[submodule "third_party/hwcomponents"]
+	path = third_party/hwcomponents
+	url = https://github.com/Accelergy-Project/hwcomponents.git
+[submodule "third_party/hwcomponents-cacti"]
+	path = third_party/hwcomponents-cacti
+	url = https://github.com/Accelergy-Project/hwcomponents-cacti.git
+[submodule "third_party/timeloop"]
+	path = third_party/timeloop
+	url = https://github.com/NVlabs/timeloop.git
