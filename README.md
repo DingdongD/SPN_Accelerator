@@ -30,25 +30,25 @@ External architecture tools used by calibration and DSE are pinned under `third_
 | Module | Role |
 |---|---|
 | SCALE-Sim v3 | tensor-array cycle/traffic golden |
-| Ramulator2 | DDR/HBM cycle-level timing |
+| Ramulator2 | standalone modern DDR/HBM timing backend |
 | BookSim2 | NoC contention |
 | Accelergy | action-count energy framework |
 | HWComponents | component-model stack |
 | HWComponents-CACTI | CACTI-backed SRAM/cache/DRAM models; recursively pulls CACTI |
 | Timeloop | optional mapper/tiling cross-validation |
 
-Exact upstream commits are recorded in `third_party/manifest.json`. Reported experiments must not use `git submodule update --remote`.
+Exact upstream commits are recorded in `third_party/manifest.json`. SCALE-Sim's own nested legacy Ramulator is separately pinned for SCALE-Sim internal use; `third_party/ramulator2` is the standalone CModel memory backend. Reported experiments must not use `git submodule update --remote`.
 
 ## One-shot local setup
 
-Clone the development branch with its pinned dependencies:
+For the **complete stack**, use Python 3.12 because the pinned HWComponents packages require it:
 
 ```bash
 git clone --branch agent/add-architectural-cmodel --recurse-submodules \
   https://github.com/DingdongD/SPN_Accelerator.git
 cd SPN_Accelerator
 
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -e '.[validation]'
@@ -57,11 +57,18 @@ bash third_party/bootstrap.sh
 python third_party/check.py
 ```
 
-Equivalent Makefile path:
+Equivalent:
 
 ```bash
 make setup
 make check-third-party
+```
+
+If only the timing/calibration stack is required, Python 3.10/3.11 is also supported:
+
+```bash
+make setup-core
+make check-third-party-core
 ```
 
 If the repository was cloned without submodules:
@@ -72,9 +79,9 @@ git submodule update --init --recursive
 bash third_party/bootstrap.sh
 ```
 
-`bootstrap.sh` installs SCALE-Sim, Accelergy and HWComponents editable into the active venv, builds/installs Ramulator2, and builds BookSim2. Timeloop source is initialized but not built automatically because its upstream build additionally requires system ISL/Barvinok dependencies.
+The default bootstrap installs SCALE-Sim, Accelergy, HWComponents and HWComponents-CACTI into the active venv, builds/installs Ramulator2, and builds BookSim2. Timeloop source is initialized but not built automatically because upstream additionally requires system ISL/Barvinok dependencies. BookSim2 requires `flex` and `bison`.
 
-See `third_party/README.md` for `--init-only`, `--no-build`, pin verification and update policy.
+See `third_party/README.md` for `--core`, `--init-only`, `--no-build`, exact pin verification and update policy.
 
 ## Smoke test
 
@@ -112,7 +119,7 @@ Run every locally available gate:
 make calibrate
 ```
 
-Once real SPN/RTL/ACTSim/board goldens are supplied:
+`make calibrate` first verifies all third-party git pins. Once real SPN/RTL/ACTSim/board goldens are supplied:
 
 ```bash
 make calibrate-strict
@@ -140,32 +147,20 @@ See `CALIBRATION_PLAN.md` for calibration/hold-out splits, fitting order and qua
 
 ## Calibration boundary
 
-Do not calibrate Tensor/SPN cycles to board wall time. Keep these categories separate:
-
-```text
-accelerator core
-DMA / modeled memory
-package/model load
-launch/runtime
-CPU glue
-quant/dequant
-CPU fallback
-```
-
-Only components represented in the architectural CModel may be used to fit CModel parameters.
+Do not calibrate Tensor/SPN cycles to board wall time. Keep accelerator core, modeled DMA/memory, package/model load, launch/runtime, CPU glue, quant/dequant and CPU fallback separately accounted. Only components represented in the architectural CModel may be used to fit CModel parameters.
 
 ## Fidelity roadmap
 
 ```text
 functional semantics
     -> SCALE-Sim tensor calibration
-    -> SRAM/DMA/Ramulator calibration
+    -> SRAM/DMA/Ramulator2 calibration
     -> SPN exact RTL address contract
     -> SPN cycle calibration
     -> ACTSim subgraphs
     -> board subgraphs
     -> full CompletionFormer/CSPN/NLSPN/DySPN validation
-    -> architecture DSE
+    -> Timeloop/BookSim/energy-assisted architecture DSE
 ```
 
 Ramulator2, BookSim2, Accelergy/HWComponents-CACTI and Timeloop are already pinned in `third_party/` so later fidelity stages do not require changing the source-dependency baseline.
