@@ -9,6 +9,9 @@ description = "Tile/event-level architectural CModel for dense tensor engines an
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+validation = ["numpy>=1.24"]
+
 [project.scripts]
 spn-cmodel = "spn_accel_cmodel.cli:main"
 

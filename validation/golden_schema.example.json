@@ -1,0 +1,13 @@
+{
+  "source": "actsim|rtl|board|scalesim",
+  "revision": "record the exact simulator/RTL/board revision here",
+  "metrics": {
+    "tensor.dec2.cycles": 0,
+    "tensor.dec2.act_bytes": 0,
+    "tensor.dec2.weight_bytes": 0,
+    "tensor.dec2.output_bytes": 0,
+    "spn.nlspn.cycles": 0,
+    "spn.nlspn.gather_reads": 0,
+    "spn.nlspn.bank_conflict_stall_cycles": 0
+  }
+}

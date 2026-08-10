@@ -84,6 +84,56 @@ SPN bank/gather sweep:
 PYTHONPATH=. python examples/sweep_spn.py
 ```
 
+## Validation quick start
+
+The repository now contains an executable staged validation chain instead of placeholder hooks:
+
+```text
+PyTorch functional semantics
+        -> real CompletionFormer offset/affinity trace
+        -> CModel address/bank trace
+        -> SPN RTL exact-vector comparison
+
+Tensor CModel
+        -> SCALE-Sim GEMM compute validation
+        -> SCALE-Sim Conv cycle + traffic validation
+
+Subgraph CModel
+        -> normalized ACTSim/board JSON comparison
+```
+
+Install only the optional local validation dependency:
+
+```bash
+python -m pip install -e '.[validation]'
+python -m unittest discover -s tests -v
+```
+
+Tensor-array cross-checks (requires SCALE-Sim installed in that environment):
+
+```bash
+PYTHONPATH=. python validation/validate_tensor_scalesim.py
+PYTHONPATH=. python validation/validate_conv_scalesim.py
+```
+
+Run a real CompletionFormer/NLSPN offset trace:
+
+```bash
+PYTHONPATH=. python validation/validate_spn_trace.py trace.npz \
+  --offset-key offset --steps 12
+```
+
+Generate/compare the exact SPN RTL gather contract:
+
+```bash
+PYTHONPATH=. python validation/export_spn_rtl_vectors.py \
+  --height 16 --width 16 --out validation/out/spn_vectors.csv
+PYTHONPATH=. python validation/compare_spn_rtl_trace.py \
+  validation/out/spn_vectors.csv rtl_vectors.csv
+```
+
+See [`validation/README.md`](validation/README.md) for semantic assumptions, report schemas, acceptance gates, and ACTSim/board calibration boundaries. The presence of these adapters does **not** mean SCALE-Sim/RTL/ACTSim accuracy has already been measured; an external golden must be supplied and the generated report must pass.
+
 ## CompletionFormer representative workload
 
 `completionformer_dec2_nlspn_workload()` currently models:
