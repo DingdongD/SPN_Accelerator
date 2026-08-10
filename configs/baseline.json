@@ -1,0 +1,47 @@
+{
+  "frequency_hz": 1000000000.0,
+  "tensor": {
+    "rows": 64,
+    "cols": 64,
+    "pipeline_depth": 2,
+    "act_sram_bytes": 262144,
+    "weight_sram_bytes": 524288,
+    "psum_sram_bytes": 262144,
+    "double_buffer": true,
+    "act_bytes": 1,
+    "weight_bytes": 1,
+    "psum_bytes": 4
+  },
+  "dma": {
+    "channels": 2,
+    "bandwidth_bytes_per_cycle": 32.0,
+    "setup_cycles": 12
+  },
+  "spn": {
+    "agu_lanes": 16,
+    "gather_lanes": 32,
+    "interp_lanes": 16,
+    "affinity_lanes": 16,
+    "agu_latency": 2,
+    "interp_latency": 3,
+    "affinity_latency": 2,
+    "packet_pixels": 32,
+    "neighbors": 8,
+    "metadata_sram": {
+      "capacity_bytes": 786432,
+      "banks": 16,
+      "ports_per_bank": 1,
+      "word_bytes": 2,
+      "read_latency": 1,
+      "write_latency": 1
+    },
+    "state_sram": {
+      "capacity_bytes": 65536,
+      "banks": 16,
+      "ports_per_bank": 1,
+      "word_bytes": 2,
+      "read_latency": 1,
+      "write_latency": 1
+    }
+  }
+}
