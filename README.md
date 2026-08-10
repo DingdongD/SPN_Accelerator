@@ -109,6 +109,14 @@ python -m pip install -e '.[validation]'
 python -m unittest discover -s tests -v
 ```
 
+Run the staged local calibration suite:
+
+```bash
+PYTHONPATH=. python validation/run_calibration_suite.py
+```
+
+The runner records the git revision/environment, executes all locally available gates, and marks external-golden stages as `SKIP` when SCALE-Sim/RTL/ACTSim/board data is absent. Re-run with `--strict` once all external goldens are present.
+
 Tensor-array cross-checks (requires SCALE-Sim installed in that environment):
 
 ```bash
@@ -132,7 +140,7 @@ PYTHONPATH=. python validation/compare_spn_rtl_trace.py \
   validation/out/spn_vectors.csv rtl_vectors.csv
 ```
 
-See [`validation/README.md`](validation/README.md) for semantic assumptions, report schemas, acceptance gates, and ACTSim/board calibration boundaries. The presence of these adapters does **not** mean SCALE-Sim/RTL/ACTSim accuracy has already been measured; an external golden must be supplied and the generated report must pass.
+See [`CALIBRATION_PLAN.md`](CALIBRATION_PLAN.md) for the calibration/hold-out matrix, parameter-fitting order, and acceptance thresholds. See [`validation/README.md`](validation/README.md) for semantic assumptions, report schemas, and ACTSim/board calibration boundaries. The presence of these adapters does **not** mean SCALE-Sim/RTL/ACTSim accuracy has already been measured; an external golden must be supplied and the generated report must pass.
 
 ## CompletionFormer representative workload
 
@@ -154,7 +162,7 @@ The repository does **not** vendor other simulators. It provides clean boundarie
 - **CACTI/Accelergy**: future SRAM action energy/area and action-count energy model;
 - **Gemmini/NVDLA/Verilator**: selected RTL/SystemC validation points.
 
-See [`validation/README.md`](validation/README.md) for the staged calibration plan.
+See [`CALIBRATION_PLAN.md`](CALIBRATION_PLAN.md) and [`validation/README.md`](validation/README.md) for the staged calibration plan.
 
 ## Important interpretation
 
