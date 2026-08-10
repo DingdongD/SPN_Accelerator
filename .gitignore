@@ -6,3 +6,6 @@ __pycache__/
 build/
 dist/
 results/
+validation/out/
+validation/local_goldens/*
+!validation/local_goldens/README.md
