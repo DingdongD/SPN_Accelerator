@@ -5,10 +5,13 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-from .torch_spn_core import as_nchw
+from .torch_spn_core import as_nchw, sample_neighbors
 from .torch_spn_types import (
     CanonicalSPNPlan,
     GRID8_XY,
+    NeighborConfidenceMode,
+    NormalizationMode,
+    OffsetMode,
     ReductionMode,
     SPNConfig,
     SPNInputs,
@@ -165,4 +168,160 @@ def compile_cspn_plan(
         post_gate=post_gate,
         post_value=post_value,
         reduction_mode=ReductionMode.TORCH_SUM,
+    )
+
+
+def _static_offsets(
+    config: SPNConfig,
+    inputs: SPNInputs,
+    current: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if inputs.offsets is None:
+        raise ValueError("offset propagation requires offsets")
+    offsets = inputs.offsets.to(device=current.device, dtype=torch.float32)
+    if offsets.ndim == 4 and offsets.shape[1] in {
+        2 * config.num_neighbors,
+        2 * (config.num_neighbors + 1),
+    }:
+        points = offsets.shape[1] // 2
+        offsets = offsets.reshape(
+            offsets.shape[0],
+            points,
+            2,
+            offsets.shape[2],
+            offsets.shape[3],
+        )
+        if points == config.num_neighbors + 1:
+            center = config.num_neighbors // 2
+            offsets = torch.cat((offsets[:, :center], offsets[:, center + 1 :]), dim=1)
+    expected = (
+        current.shape[0],
+        config.num_neighbors,
+        2,
+        current.shape[2],
+        current.shape[3],
+    )
+    if tuple(offsets.shape) != expected:
+        raise ValueError(f"offsets must have shape {expected}, got {tuple(offsets.shape)}")
+    residual_xy = offsets[:, :, [1, 0]] if config.offset_mode is OffsetMode.RESIDUAL_YX else offsets
+    if config.offset_mode is OffsetMode.ABSOLUTE_XY:
+        return residual_xy, residual_xy
+    if not config.base_offsets_xy:
+        raise ValueError("residual offsets require base_offsets_xy")
+    return residual_xy, _base_offsets(config.base_offsets_xy, current) + residual_xy
+
+
+def _sparse_and_mask(
+    inputs: SPNInputs,
+    current: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if inputs.sparse_depth is None:
+        raise ValueError("configured sparse fusion requires sparse_depth")
+    sparse = as_nchw(inputs.sparse_depth, "sparse_depth", device=current.device)
+    if sparse.shape != current.shape:
+        raise ValueError("sparse_depth must have the same shape as current")
+    if inputs.sparse_mask is None:
+        mask = (sparse > 0.0).to(dtype=torch.float32)
+    else:
+        raw_mask = as_nchw(inputs.sparse_mask, "sparse_mask", device=current.device)
+        if raw_mask.shape != current.shape:
+            raise ValueError("sparse_mask must have the same shape as current")
+        mask = (raw_mask > 0.0).to(dtype=torch.float32)
+    return sparse, mask
+
+
+def _compile_nlspn_like_plan(
+    config: SPNConfig,
+    inputs: SPNInputs,
+    current: torch.Tensor,
+    initial: torch.Tensor,
+    *,
+    temperature: float,
+) -> CanonicalSPNPlan:
+    del initial
+    affinity = _neighbor_map(inputs.affinity, current, config.num_neighbors, "affinity")
+    residual_xy, total_xy = _static_offsets(config, inputs, current)
+    if config.normalization in {NormalizationMode.TC, NormalizationMode.TGASS}:
+        scale = (
+            float(config.num_neighbors)
+            if config.normalization is NormalizationMode.TC
+            else config.affinity_gamma * float(config.num_neighbors) + 1.0e-8
+        )
+        affinity = torch.tanh(affinity / temperature) / scale
+    if config.neighbor_confidence is NeighborConfidenceMode.SAMPLE_AT_NEIGHBOR:
+        if inputs.confidence is None:
+            raise ValueError("neighbor confidence sampling requires confidence")
+        confidence = as_nchw(inputs.confidence, "confidence", device=current.device)
+        if confidence.shape != (current.shape[0], 1, current.shape[2], current.shape[3]):
+            raise ValueError("confidence must have shape [B,1,H,W]")
+        confidence_offsets = total_xy if config.legacy_confidence_offsets else residual_xy
+        sampled_confidence = sample_neighbors(
+            confidence,
+            confidence_offsets.detach(),
+            config.sampling_mode,
+            config.padding_mode,
+            align_corners=config.align_corners,
+        )[:, :, 0]
+        affinity = affinity * sampled_confidence
+    denominator = torch.sum(torch.abs(affinity), dim=1, keepdim=True) + config.eps
+    if config.normalization in {NormalizationMode.ASS, NormalizationMode.TGASS}:
+        denominator = torch.where(
+            denominator < 1.0,
+            torch.ones_like(denominator),
+            denominator,
+        )
+    if config.normalization in {
+        NormalizationMode.AS,
+        NormalizationMode.ASS,
+        NormalizationMode.TGASS,
+    }:
+        affinity = affinity / denominator
+    current_affinity = 1.0 - torch.sum(affinity, dim=1, keepdim=True)
+    initial_affinity = torch.zeros_like(current_affinity)
+    pre_gate = None
+    pre_value = None
+    if config.sparse_fusion is SparseFusionMode.HARD_PRE:
+        sparse, mask = _sparse_and_mask(inputs, current)
+        pre_gate = mask.unsqueeze(1)
+        pre_value = sparse.unsqueeze(1)
+    return _make_plan(
+        config=config,
+        current=current,
+        offsets_xy=total_xy,
+        neighbor_affinity=affinity.unsqueeze(2),
+        current_affinity=current_affinity,
+        initial_affinity=initial_affinity,
+        pre_gate=pre_gate,
+        pre_value=pre_value,
+        reduction_mode=ReductionMode.TORCH_SUM,
+    )
+
+
+def compile_nlspn_plan(
+    config: SPNConfig,
+    inputs: SPNInputs,
+    current: torch.Tensor,
+    initial: torch.Tensor,
+) -> CanonicalSPNPlan:
+    return _compile_nlspn_like_plan(
+        config,
+        inputs,
+        current,
+        initial,
+        temperature=1.0,
+    )
+
+
+def compile_completionformer_plan(
+    config: SPNConfig,
+    inputs: SPNInputs,
+    current: torch.Tensor,
+    initial: torch.Tensor,
+) -> CanonicalSPNPlan:
+    return _compile_nlspn_like_plan(
+        config,
+        inputs,
+        current,
+        initial,
+        temperature=100.0,
     )
