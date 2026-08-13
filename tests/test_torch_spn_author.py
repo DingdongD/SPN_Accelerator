@@ -11,6 +11,7 @@ if torch is not None:
 
     from spn_accel_cmodel.torch_spn_author import (
         CompletionFormerAuthor,
+        DySPNAuthor,
         NLSPNAuthor,
     )
     from spn_accel_cmodel.torch_spn_decoded import DecodedSPNParameters
@@ -179,6 +180,91 @@ class CompletionFormerAuthorDecoderTest(
     author_type = CompletionFormerAuthor
     config_factory = SPNConfig.completionformer
     input_type = CompletionFormerRawInputs
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class DySPNAuthorDecoderTest(unittest.TestCase):
+    def test_all_released_k_values_match_author_conv_split_and_view(self):
+        generator = torch.Generator().manual_seed(8201)
+        for neighbors in (1, 3, 5, 9):
+            with self.subTest(neighbors=neighbors):
+                config = SPNConfig.dyspn(iterations=2, num_neighbors=neighbors)
+                author = DySPNAuthor(config)
+                with torch.no_grad():
+                    author.conv_offset_aff.weight.copy_(
+                        torch.randn(
+                            author.conv_offset_aff.weight.shape,
+                            generator=generator,
+                        )
+                    )
+                    author.conv_offset_aff.bias.copy_(
+                        torch.randn(
+                            author.conv_offset_aff.bias.shape,
+                            generator=generator,
+                        )
+                    )
+                initial = torch.randn((1, 1, 3, 4), generator=generator)
+                guide = torch.randn(
+                    (1, 2 * neighbors, 3, 4),
+                    generator=generator,
+                )
+                sparse = torch.zeros_like(initial)
+                confidence_logits = torch.randn(
+                    initial.shape,
+                    generator=generator,
+                )
+                decoded = author.decode(
+                    DySPNRawInputs(
+                        initial,
+                        guide,
+                        sparse,
+                        confidence_logits,
+                    )
+                )
+
+                raw = F.conv2d(
+                    guide,
+                    author.conv_offset_aff.weight,
+                    author.conv_offset_aff.bias,
+                    padding=1,
+                )
+                offset_flat, affinity_flat = torch.split(
+                    raw,
+                    [4 * neighbors, 2 * neighbors],
+                    dim=1,
+                )
+                expected_offsets = offset_flat.view(
+                    1, 2, neighbors, 2, 3, 4
+                )
+                expected_logits = affinity_flat.view(1, 2, neighbors, 3, 4)
+                torch.testing.assert_close(
+                    decoded.residual_offsets_yx,
+                    expected_offsets,
+                )
+                torch.testing.assert_close(decoded.raw_affinity, expected_logits)
+                self.assertIs(decoded.confidence_logits, confidence_logits)
+                self.assertEqual(
+                    tuple(author.conv_offset_aff.weight.shape),
+                    (6 * neighbors, 2 * neighbors, 3, 3),
+                )
+
+    def test_explicit_prefix_loads_exact_dyspn_conv_parameters(self):
+        author = DySPNAuthor(SPNConfig.dyspn(iterations=2, num_neighbors=5))
+        generator = torch.Generator().manual_seed(8202)
+        weight = torch.randn(author.conv_offset_aff.weight.shape, generator=generator)
+        bias = torch.randn(author.conv_offset_aff.bias.shape, generator=generator)
+        state = {
+            "module.dyspn_2_5.conv_offset_aff.weight": weight,
+            "module.dyspn_2_5.conv_offset_aff.bias": bias,
+        }
+        author.load_official_parameters(state, prefix="module.dyspn_2_5.")
+        torch.testing.assert_close(author.conv_offset_aff.weight, weight)
+        torch.testing.assert_close(author.conv_offset_aff.bias, bias)
+
+        missing = dict(state)
+        del missing["module.dyspn_2_5.conv_offset_aff.bias"]
+        with self.assertRaisesRegex(ValueError, "conv_offset_aff.bias"):
+            author.load_official_parameters(missing, prefix="module.dyspn_2_5.")
 
 
 if __name__ == "__main__":

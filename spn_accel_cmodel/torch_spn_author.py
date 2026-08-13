@@ -11,6 +11,7 @@ from .torch_spn_core import as_nchw
 from .torch_spn_decoded import DecodedSPNParameters
 from .torch_spn_types import (
     CompletionFormerRawInputs,
+    DySPNRawInputs,
     NLSPNRawInputs,
     NormalizationMode,
     SPNConfig,
@@ -145,3 +146,78 @@ class CompletionFormerAuthor(_NLSPNFamilyAuthor):
     profile = SPNProfile.COMPLETIONFORMER
     initial_field = "pred_init"
     sparse_field = "sparse_depth"
+
+
+class DySPNAuthor(nn.Module, _OfficialParameterLoader):
+    input_type = DySPNRawInputs
+    profile = SPNProfile.DYSPN
+    _official_parameter_names = (
+        "conv_offset_aff.weight",
+        "conv_offset_aff.bias",
+    )
+
+    def __init__(self, config: SPNConfig):
+        super().__init__()
+        if config.profile is not self.profile:
+            raise ValueError("DySPNAuthor requires DYSPN config")
+        self.config = config
+        channels = config.iterations * config.num_neighbors
+        self.conv_offset_aff = nn.Conv2d(
+            channels,
+            3 * channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=True,
+        )
+        self.conv_offset_aff.weight.data.zero_()
+        self.conv_offset_aff.bias.data.zero_()
+
+    def decode(self, inputs: DySPNRawInputs) -> DecodedSPNParameters:
+        if not isinstance(inputs, self.input_type):
+            raise TypeError(
+                f"DYSPN expects DySPNRawInputs, got {type(inputs).__name__}"
+            )
+        current = as_nchw(inputs.feat_init, "feat_init")
+        channels = self.config.iterations * self.config.num_neighbors
+        guide = _guidance(inputs.guide, current, channels, "guide")
+        sparse = as_nchw(inputs.sparse_depth, "sparse_depth", device=current.device)
+        confidence = as_nchw(
+            inputs.confidence_logits,
+            "confidence_logits",
+            device=current.device,
+        )
+        if sparse.shape != current.shape:
+            raise ValueError("sparse_depth must have the same shape as feat_init")
+        if confidence.shape != current.shape:
+            raise ValueError("confidence_logits must have the same shape as feat_init")
+        raw = self.conv_offset_aff(guide)
+        offset_flat, affinity_flat = torch.split(
+            raw,
+            [2 * channels, channels],
+            dim=1,
+        )
+        b, _, h, w = current.shape
+        offsets = offset_flat.view(
+            b,
+            self.config.iterations,
+            self.config.num_neighbors,
+            2,
+            h,
+            w,
+        )
+        affinity = affinity_flat.view(
+            b,
+            self.config.iterations,
+            self.config.num_neighbors,
+            h,
+            w,
+        )
+        return DecodedSPNParameters(
+            current=current,
+            initial=current,
+            raw_affinity=affinity,
+            residual_offsets_yx=offsets,
+            confidence_logits=confidence,
+            sparse_depth=sparse,
+        )
