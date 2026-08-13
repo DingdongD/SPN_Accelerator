@@ -13,6 +13,7 @@ if torch is not None:
     from spn_accel_cmodel import (
         torch_functional,
         torch_spn_adapters,
+        torch_spn_author,
         torch_spn_core,
         torch_spn_types,
     )
@@ -237,7 +238,12 @@ class StructuralUnificationTest(unittest.TestCase):
                     offenders.append((self.function, iterator))
                 self.generic_visit(node)
 
-        for module in (torch_functional, torch_spn_core, torch_spn_adapters):
+        for module in (
+            torch_functional,
+            torch_spn_author,
+            torch_spn_core,
+            torch_spn_adapters,
+        ):
             LoopVisitor().visit(ast.parse(inspect.getsource(module)))
         self.assertEqual(
             offenders,
