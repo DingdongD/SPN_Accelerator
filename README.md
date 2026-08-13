@@ -99,6 +99,63 @@ Representative workload:
 
 The current baseline result is an **architecture-model prediction**, not a calibrated silicon claim.
 
+## Torch propagation goldens
+
+`spn_accel_cmodel.torch_functional` provides a propagation-only FP32 model for
+the released CSPN, NLSPN, CompletionFormer, and DySPN implementations.  It does
+not include the CNN/Transformer heads that predict initial depth, offsets,
+affinity, confidence, or attention.
+
+Canonical profiles preserve the author-code distinctions rather than treating
+all SPNs as an eight-neighbor absolute-sum kernel:
+
+| Profile | Propagation semantics |
+|---|---|
+| `SPNConfig.cspn()` | shifted 3x3 integer stencil, initial anchor, zero padding, optional code-exact post mask |
+| `SPNConfig.nlspn()` | deformable eight-neighbor sampling, AS/ASS/TC/TGASS, current anchor, sampled confidence |
+| `SPNConfig.completionformer()` | NLSPN fork with `tanh(raw / 100)` and six-step default |
+| `SPNConfig.dyspn()` | per-iteration offsets/logits, K=1/3/5/9 including center, softmax, sparse-confidence post fusion |
+| `SPNConfig.dyspn_nlpm()` | separately named 3x3/5x5/7x7 nonlinear propagation compatibility path |
+
+Example:
+
+```python
+from spn_accel_cmodel import SPNConfig, SPNInputs, UnifiedSPN
+
+model = UnifiedSPN(SPNConfig.completionformer(iterations=6))
+output, trace = model(
+    SPNInputs(
+        current=pred_init,          # [B,1,H,W]
+        affinity=raw_affinity,      # [B,8,H,W]
+        offsets=offset,             # [B,8,2,H,W] or released [B,16/18,H,W]
+        confidence=confidence,      # [B,1,H,W]
+        sparse_depth=sparse_depth,
+    ),
+    return_trace=True,
+)
+```
+
+Run the independent author-formula differential suite:
+
+```bash
+python -m pip install -e '.[torch-validation]'
+PYTHONPATH=. python -m unittest discover -s tests -p 'test_torch_spn_goldens.py' -v
+```
+
+The golden functions in `tests/official_spn_references.py` do not import the
+unified implementation.  Fixed-seed tests compare every iteration as well as
+effective affinity and anchor coefficients.  Integer microcases use exact
+checks where operation ordering allows; interpolated FP32 paths use
+`rtol=1e-5, atol=1e-6`.
+
+NLSPN and CompletionFormer use DCNv2 as the carrier for deformable gather,
+bilinear interpolation, affinity multiplication, and reduction.  DCNv2 is
+therefore related to propagation implementation, but compiling it is not
+required for these Torch goldens: tests inject identical state, offset,
+affinity, confidence, and sparse tensors directly at the propagation boundary.
+An installed official CUDA extension can be used as an additional carrier
+check, but is not a CPU-CI dependency.
+
 ## Validation chain
 
 ```text

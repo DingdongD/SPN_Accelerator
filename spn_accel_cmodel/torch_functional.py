@@ -485,7 +485,100 @@ class UnifiedSPN(nn.Module):
             return self._forward_dyspn(inputs, current)
         if self.config.profile is SPNProfile.DYSPN_NLPM:
             return self._forward_dyspn_nlpm(inputs, current, initial)
-        raise NotImplementedError(f"unsupported generic profile {self.config.profile.name}")
+        if self.config.profile is SPNProfile.GENERIC:
+            return self._forward_generic(inputs, current, initial)
+        raise NotImplementedError(f"unsupported profile {self.config.profile.name}")
+
+    def _forward_generic(
+        self,
+        inputs: SPNInputs,
+        current: torch.Tensor,
+        initial: torch.Tensor,
+    ) -> tuple[torch.Tensor, SPNTrace]:
+        cfg = self.config
+        if cfg.affinity_layout is not AffinityLayout.TARGET:
+            raise ValueError("generic recurrence only accepts target-layout affinity")
+        if cfg.anchor_mode is AnchorMode.INITIAL_CURRENT:
+            raise ValueError("generic INITIAL_CURRENT anchoring needs an explicit model profile")
+
+        sparse = None
+        mask = None
+        if cfg.sparse_fusion is not SparseFusionMode.NONE:
+            sparse = _required_sparse(inputs, current)
+            mask = _sparse_mask(inputs, sparse, current)
+        soft_confidence = None
+        if cfg.sparse_fusion is SparseFusionMode.SOFT_POST:
+            if inputs.confidence is None:
+                raise ValueError("SOFT_POST requires confidence")
+            soft_confidence = _as_nchw(inputs.confidence, "confidence").to(
+                device=current.device
+            )
+            if soft_confidence.shape != current.shape:
+                raise ValueError("confidence must have the same shape as current")
+            soft_confidence = soft_confidence * mask
+
+        trace = SPNTrace()
+        state = current
+        for iteration in range(cfg.iterations):
+            if cfg.sparse_fusion is SparseFusionMode.HARD_PRE:
+                state = (1.0 - mask) * state + mask * sparse
+            offsets = _generic_offsets(inputs, current, cfg, iteration)
+            raw_affinity = _generic_affinity(inputs.affinity, current, cfg, iteration)
+            affinity = _normalize_generic_affinity(raw_affinity, cfg)
+            if cfg.neighbor_confidence is NeighborConfidenceMode.SAMPLE_AT_NEIGHBOR:
+                if inputs.confidence is None:
+                    raise ValueError("neighbor confidence sampling requires confidence")
+                confidence = _as_nchw(inputs.confidence, "confidence").to(
+                    device=current.device
+                )
+                sampled_confidence = sample_neighbors(
+                    confidence,
+                    offsets.detach(),
+                    cfg.sampling_mode,
+                    cfg.padding_mode,
+                    align_corners=cfg.align_corners,
+                )[:, :, 0]
+                affinity = _normalize_generic_affinity(
+                    raw_affinity * sampled_confidence,
+                    cfg,
+                )
+
+            residual_affinity = 1.0 - torch.sum(affinity, dim=1, keepdim=True)
+            current_affinity = (
+                residual_affinity if cfg.anchor_mode is AnchorMode.CURRENT else None
+            )
+            initial_affinity = (
+                residual_affinity if cfg.anchor_mode is AnchorMode.INITIAL else None
+            )
+            samples = sample_neighbors(
+                state,
+                offsets,
+                cfg.sampling_mode,
+                cfg.padding_mode,
+                align_corners=cfg.align_corners,
+            )
+            candidate = torch.sum(samples * affinity[:, :, None], dim=1)
+            if current_affinity is not None:
+                candidate = candidate + current_affinity * state
+            if initial_affinity is not None:
+                candidate = candidate + initial_affinity * initial
+
+            if cfg.sparse_fusion is SparseFusionMode.HARD_POST:
+                state = (1.0 - mask) * candidate + mask * sparse
+            elif cfg.sparse_fusion is SparseFusionMode.CSPN_CODE_POST:
+                state = (1.0 - mask) * candidate + mask * initial
+            elif cfg.sparse_fusion is SparseFusionMode.SOFT_POST:
+                state = (1.0 - soft_confidence) * candidate + soft_confidence * sparse
+            else:
+                state = candidate
+
+            trace.candidates.append(candidate)
+            trace.outputs.append(state)
+            trace.offsets.append(offsets)
+            trace.neighbor_affinities.append(affinity)
+            trace.current_affinities.append(current_affinity)
+            trace.initial_affinities.append(initial_affinity)
+        return state, trace
 
     def _forward_dyspn(
         self,
@@ -686,6 +779,86 @@ def _as_iteration_neighbor_map(
     return tensor
 
 
+def _generic_affinity(
+    value: torch.Tensor,
+    current: torch.Tensor,
+    cfg: SPNConfig,
+    iteration: int,
+) -> torch.Tensor:
+    if cfg.affinity_mode is AffinityMode.STATIC:
+        return _as_neighbor_map(value, current, cfg.num_neighbors, "affinity")
+    return _as_iteration_neighbor_map(value, current, cfg)[:, iteration]
+
+
+def _generic_offsets(
+    inputs: SPNInputs,
+    current: torch.Tensor,
+    cfg: SPNConfig,
+    iteration: int,
+) -> torch.Tensor:
+    if cfg.neighbor_mode in {NeighborMode.GRID, NeighborMode.DILATED}:
+        if cfg.num_neighbors != 8:
+            raise ValueError("generic GRID/DILATED mode requires eight neighbors")
+        scale = float(cfg.dilation if cfg.neighbor_mode is NeighborMode.DILATED else 1)
+        values = tuple((x * scale, y * scale) for x, y in _GRID8_XY)
+        return base_offsets_tensor(values, current)
+    if inputs.offsets is None:
+        raise ValueError("OFFSET neighbor mode requires offsets")
+    if cfg.affinity_mode is AffinityMode.STATIC:
+        _, total = _static_residual_offsets(inputs, current, cfg)
+        return total
+
+    offsets = inputs.offsets.to(device=current.device, dtype=torch.float32)
+    expected = (
+        current.shape[0],
+        cfg.iterations,
+        cfg.num_neighbors,
+        2,
+        current.shape[2],
+        current.shape[3],
+    )
+    if tuple(offsets.shape) != expected:
+        raise ValueError(
+            f"per-iteration offsets must have shape {expected}, got {tuple(offsets.shape)}"
+        )
+    selected = offsets[:, iteration]
+    if cfg.offset_mode is OffsetMode.RESIDUAL_YX:
+        selected = selected[:, :, [1, 0]]
+    if cfg.offset_mode is OffsetMode.ABSOLUTE_XY:
+        return selected
+    if not cfg.base_offsets_xy:
+        raise ValueError("residual offsets require base_offsets_xy")
+    return base_offsets_tensor(cfg.base_offsets_xy, current) + selected
+
+
+def _normalize_generic_affinity(
+    raw_affinity: torch.Tensor,
+    cfg: SPNConfig,
+) -> torch.Tensor:
+    affinity = raw_affinity
+    if cfg.normalization in {NormalizationMode.TC, NormalizationMode.TGASS}:
+        scale = (
+            float(cfg.num_neighbors)
+            if cfg.normalization is NormalizationMode.TC
+            else cfg.affinity_gamma * float(cfg.num_neighbors) + 1.0e-8
+        )
+        affinity = torch.tanh(affinity / cfg.tanh_temperature) / scale
+    if cfg.normalization is NormalizationMode.SOFTMAX:
+        return torch.softmax(affinity, dim=1)
+    if cfg.normalization is NormalizationMode.TC:
+        return affinity
+    if cfg.normalization is NormalizationMode.DYSPN_NLPM:
+        raise ValueError("DYSPN_NLPM normalization requires the named NLPM profile")
+    denominator = torch.sum(torch.abs(affinity), dim=1, keepdim=True) + cfg.eps
+    if cfg.normalization in {NormalizationMode.ASS, NormalizationMode.TGASS}:
+        denominator = torch.where(
+            denominator < 1.0,
+            torch.ones_like(denominator),
+            denominator,
+        )
+    return affinity / denominator
+
+
 def _static_residual_offsets(
     inputs: SPNInputs,
     current: torch.Tensor,
@@ -729,6 +902,8 @@ def _static_residual_offsets(
         residual_xy = offsets
     if cfg.offset_mode is OffsetMode.ABSOLUTE_XY:
         return residual_xy, residual_xy
+    if not cfg.base_offsets_xy:
+        raise ValueError("residual offsets require base_offsets_xy")
     base = base_offsets_tensor(cfg.base_offsets_xy, current)
     return residual_xy, base + residual_xy
 

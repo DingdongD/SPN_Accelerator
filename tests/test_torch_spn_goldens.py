@@ -1,30 +1,35 @@
 import unittest
 
-import torch
+try:
+    import torch
 
-from spn_accel_cmodel.torch_functional import (
-    AffinityMode,
-    AnchorMode,
-    NeighborConfidenceMode,
-    NormalizationMode,
-    OffsetMode,
-    PaddingMode,
-    SPNConfig,
-    SPNInputs,
-    SamplingMode,
-    SparseFusionMode,
-    UnifiedSPN,
-    sample_neighbors,
-)
+    from spn_accel_cmodel.torch_functional import (
+        AffinityMode,
+        AffinityLayout,
+        AnchorMode,
+        NeighborConfidenceMode,
+        NeighborMode,
+        NormalizationMode,
+        OffsetMode,
+        PaddingMode,
+        SPNConfig,
+        SPNInputs,
+        SamplingMode,
+        SparseFusionMode,
+        UnifiedSPN,
+        sample_neighbors,
+    )
+    from official_spn_references import (
+        reference_cspn,
+        reference_dyspn,
+        reference_dyspn_nlpm,
+        reference_nlspn,
+    )
+except ImportError:  # pragma: no cover - optional validation dependency
+    torch = None
 
-from official_spn_references import (
-    reference_cspn,
-    reference_dyspn,
-    reference_dyspn_nlpm,
-    reference_nlspn,
-)
 
-
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
 class TorchSPNSamplingTest(unittest.TestCase):
     def test_zero_padding_does_not_replicate_border(self):
         state = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
@@ -92,10 +97,71 @@ class TorchSPNSamplingTest(unittest.TestCase):
             SPNConfig.dyspn(num_neighbors=4)
 
 
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class GenericSPNTest(unittest.TestCase):
+    def test_explicit_config_runs_general_recurrence_and_hard_post_fusion(self):
+        cfg = SPNConfig(
+            iterations=1,
+            num_neighbors=1,
+            neighbor_mode=NeighborMode.OFFSET,
+            sampling_mode=SamplingMode.BILINEAR,
+            padding_mode=PaddingMode.ZEROS,
+            offset_mode=OffsetMode.ABSOLUTE_XY,
+            affinity_mode=AffinityMode.STATIC,
+            normalization=NormalizationMode.AS,
+            anchor_mode=AnchorMode.INITIAL,
+            sparse_fusion=SparseFusionMode.HARD_POST,
+            affinity_layout=AffinityLayout.TARGET,
+        )
+        current = torch.ones((1, 1, 2, 3))
+        initial = torch.zeros_like(current)
+        sparse = torch.zeros_like(current)
+        sparse[:, :, 0, 1] = 9.0
+        actual = UnifiedSPN(cfg)(
+            SPNInputs(
+                current=current,
+                initial=initial,
+                affinity=torch.full((1, 1, 2, 3), 0.5),
+                offsets=torch.zeros((1, 1, 2, 2, 3)),
+                sparse_depth=sparse,
+            )
+        )
+        coefficient = 0.5 / (0.5 + 1.0e-4)
+        expected = torch.full_like(current, coefficient)
+        expected[:, :, 0, 1] = 9.0
+        torch.testing.assert_close(actual, expected, rtol=1.0e-6, atol=1.0e-6)
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class TorchSPNValidationTest(unittest.TestCase):
+    def test_nlspn_rejects_missing_confidence(self):
+        with self.assertRaisesRegex(ValueError, "requires confidence"):
+            UnifiedSPN(SPNConfig.nlspn(iterations=1))(
+                SPNInputs(
+                    current=torch.zeros((1, 1, 2, 2)),
+                    affinity=torch.zeros((1, 8, 2, 2)),
+                    offsets=torch.zeros((1, 8, 2, 2, 2)),
+                )
+            )
+
+    def test_dyspn_rejects_static_affinity_shape(self):
+        with self.assertRaisesRegex(ValueError, "per-iteration affinity"):
+            UnifiedSPN(SPNConfig.dyspn(iterations=2))(
+                SPNInputs(
+                    current=torch.zeros((1, 1, 2, 2)),
+                    affinity=torch.zeros((1, 5, 2, 2)),
+                    offsets=torch.zeros((1, 2, 5, 2, 2, 2)),
+                    confidence=torch.zeros((1, 1, 2, 2)),
+                    sparse_depth=torch.zeros((1, 1, 2, 2)),
+                )
+            )
+
+
 def _randn(generator, shape, scale=1.0):
     return torch.randn(shape, generator=generator, dtype=torch.float32) * scale
 
 
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
 class CSPNGoldenTest(unittest.TestCase):
     def _case(self, preserve_code_mask):
         generator = torch.Generator().manual_seed(1207)
@@ -145,6 +211,7 @@ class CSPNGoldenTest(unittest.TestCase):
         self._case(True)
 
 
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
 class NLSPNGoldenTest(unittest.TestCase):
     def _inputs(self):
         generator = torch.Generator().manual_seed(1207)
@@ -307,6 +374,7 @@ class NLSPNGoldenTest(unittest.TestCase):
         torch.testing.assert_close(flattened18, canonical)
 
 
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
 class DySPNGoldenTest(unittest.TestCase):
     def _case(self, neighbors):
         generator = torch.Generator().manual_seed(9183 + neighbors)
@@ -390,6 +458,7 @@ class DySPNGoldenTest(unittest.TestCase):
         torch.testing.assert_close(actual[0, 0, 0, 0], torch.tensor(0.25), atol=1.0e-6, rtol=0.0)
 
 
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
 class DySPNNLPMGoldenTest(unittest.TestCase):
     def test_7x7_naive_nlpm_matches_author_operation_order(self):
         generator = torch.Generator().manual_seed(555)

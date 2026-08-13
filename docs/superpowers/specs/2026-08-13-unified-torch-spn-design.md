@@ -132,8 +132,12 @@ replacement stated in the paper without mislabeling it as source-code exact.
 The eight predicted affinities are static across propagation iterations.  The
 center coefficient `1 - sum(neighbor_weights)` multiplies the current pre-state.
 When confidence propagation is enabled, the single-channel confidence map is
-sampled at each non-center offset with detached coordinates before affinity
-normalization.  AS, ASS, TC, and TGASS remain distinct:
+sampled with detached coordinates before affinity normalization.  The current
+released default (`legacy=False`) uses residual-only offsets for this 1x1
+deformable gather; `legacy=True` adds the 3x3 base offsets.  Both behaviors are
+part of the profile because released pretrained ECCV20 models request the
+legacy path.  Propagated state always uses base plus residual offsets.  AS,
+ASS, TC, and TGASS remain distinct:
 
 - AS: absolute-sum normalization;
 - ASS: absolute-sum denominator floored to one;
