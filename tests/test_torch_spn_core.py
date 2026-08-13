@@ -128,6 +128,26 @@ class CanonicalCoreTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "offsets_xy time dimension"):
             validate_plan(state, state, plan)
 
+    def test_plan_rejects_low_rank_fields_with_named_value_error(self):
+        state = torch.zeros((1, 1, 1, 3))
+        fields = (
+            "offsets_xy",
+            "neighbor_affinity",
+            "current_affinity",
+            "initial_affinity",
+            "pre_fusion_gate",
+            "pre_fusion_value",
+            "post_fusion_gate",
+            "post_fusion_value",
+            "group_scale",
+        )
+        for name in fields:
+            for malformed in (torch.tensor(0.0), torch.zeros(1)):
+                with self.subTest(field=name, rank=malformed.ndim):
+                    plan = replace(one_neighbor_plan(), **{name: malformed})
+                    with self.assertRaisesRegex(ValueError, name):
+                        validate_plan(state, state, plan)
+
     def test_grouped_reduction_preserves_declared_group_order(self):
         current = torch.tensor([[[[1.0, 2.0, 4.0]]]])
         offsets = torch.zeros((1, 1, 3, 2, 1, 3))

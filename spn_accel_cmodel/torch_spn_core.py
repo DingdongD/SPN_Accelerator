@@ -110,6 +110,8 @@ def sample_neighbors(
 
 
 def _validate_time(name: str, tensor: torch.Tensor, iterations: int) -> None:
+    if tensor.ndim < 2:
+        raise ValueError(f"{name} must include batch and time dimensions")
     if tensor.shape[1] not in {1, iterations}:
         raise ValueError(
             f"{name} time dimension must be 1 or {iterations}, got {tensor.shape[1]}"
