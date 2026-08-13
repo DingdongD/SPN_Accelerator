@@ -55,9 +55,10 @@ def _sample_absolute_xy(
     )
     sx = xx.view(1, 1, h, w) + offsets_xy[:, :, 0]
     sy = yy.view(1, 1, h, w) + offsets_xy[:, :, 1]
-    if align_corners:
-        gx = torch.zeros_like(sx) if w == 1 else 2.0 * sx / (w - 1) - 1.0
-        gy = torch.zeros_like(sy) if h == 1 else 2.0 * sy / (h - 1) - 1.0
+    grid_align_corners = align_corners and h > 1 and w > 1
+    if grid_align_corners:
+        gx = 2.0 * sx / (w - 1) - 1.0
+        gy = 2.0 * sy / (h - 1) - 1.0
     else:
         gx = 2.0 * (sx + 0.5) / w - 1.0
         gy = 2.0 * (sy + 0.5) / h - 1.0
@@ -68,7 +69,7 @@ def _sample_absolute_xy(
         grid,
         mode=mode,
         padding_mode="zeros",
-        align_corners=align_corners,
+        align_corners=grid_align_corners,
     ).reshape(b, k, c, h, w)
 
 

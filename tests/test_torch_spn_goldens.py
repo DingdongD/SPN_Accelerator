@@ -242,6 +242,38 @@ class TorchSPNValidationTest(unittest.TestCase):
                 )
             )
 
+    def test_nlspn_rejects_wrong_affinity_channels(self):
+        with self.assertRaisesRegex(ValueError, "expected 8 channels"):
+            UnifiedSPN(SPNConfig.nlspn(iterations=1, confidence=False))(
+                SPNInputs(
+                    current=torch.zeros((1, 1, 2, 3)),
+                    affinity=torch.zeros((1, 7, 2, 3)),
+                    offsets=torch.zeros((1, 8, 2, 2, 3)),
+                )
+            )
+
+    def test_nlspn_rejects_wrong_offset_shape(self):
+        with self.assertRaisesRegex(ValueError, "offsets"):
+            UnifiedSPN(SPNConfig.nlspn(iterations=1, confidence=False))(
+                SPNInputs(
+                    current=torch.zeros((1, 1, 2, 3)),
+                    affinity=torch.zeros((1, 8, 2, 3)),
+                    offsets=torch.zeros((1, 8, 2, 2, 2)),
+                )
+            )
+
+    def test_dyspn_rejects_iteration_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "DySPN offsets"):
+            UnifiedSPN(SPNConfig.dyspn(iterations=2))(
+                SPNInputs(
+                    current=torch.zeros((1, 1, 2, 3)),
+                    affinity=torch.zeros((1, 2, 5, 2, 3)),
+                    offsets=torch.zeros((1, 1, 5, 2, 2, 3)),
+                    confidence=torch.zeros((1, 1, 2, 3)),
+                    sparse_depth=torch.zeros((1, 1, 2, 3)),
+                )
+            )
+
     @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "CUDA unavailable")
     def test_cpu_metadata_is_moved_to_cuda_state_device(self):
         current = torch.randn((1, 1, 3, 4), device="cuda")
@@ -359,6 +391,63 @@ class NLSPNGoldenTest(unittest.TestCase):
         sparse[:, :, 3, 4] = 7.0
         return initial, affinity, residual_yx, confidence, sparse
 
+    def _assert_trace(
+        self,
+        trace,
+        expected_outputs,
+        expected_affinity,
+        expected_center,
+        metadata,
+    ):
+        for actual_step, expected_step in zip(
+            trace.outputs,
+            expected_outputs,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                actual_step,
+                expected_step,
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
+        for candidate, expected_candidate in zip(
+            trace.candidates,
+            metadata["candidates"],
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                candidate,
+                expected_candidate,
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
+        for offsets in trace.offsets:
+            torch.testing.assert_close(
+                offsets,
+                metadata["offsets"],
+                rtol=0.0,
+                atol=0.0,
+            )
+        for neighbor, current, initial in zip(
+            trace.neighbor_affinities,
+            trace.current_affinities,
+            trace.initial_affinities,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                neighbor,
+                expected_affinity,
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
+            torch.testing.assert_close(
+                current,
+                expected_center,
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
+            self.assertIsNone(initial)
+
     def test_all_nlspn_affinity_modes_match_author_formula(self):
         initial, affinity, residual_yx, confidence, _ = self._inputs()
         for mode in (
@@ -388,36 +477,23 @@ class NLSPNGoldenTest(unittest.TestCase):
                     return_trace=True,
                 )
                 torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
-                torch.testing.assert_close(
-                    trace.neighbor_affinities[0], expected_aff, rtol=1.0e-5, atol=1.0e-6
-                )
-                torch.testing.assert_close(
-                    trace.current_affinities[0], expected_center, rtol=1.0e-5, atol=1.0e-6
-                )
-                for actual_step, expected_step in zip(
-                    trace.outputs,
+                self._assert_trace(
+                    trace,
                     expected_trace,
-                    strict=True,
-                ):
-                    torch.testing.assert_close(
-                        actual_step,
-                        expected_step,
-                        rtol=1.0e-5,
-                        atol=1.0e-6,
-                    )
-                for candidate, expected_candidate in zip(
-                    trace.candidates,
-                    expected_metadata["candidates"],
-                    strict=True,
-                ):
-                    torch.testing.assert_close(candidate, expected_candidate, rtol=1.0e-5, atol=1.0e-6)
-                for offsets in trace.offsets:
-                    torch.testing.assert_close(offsets, expected_metadata["offsets"], rtol=0.0, atol=0.0)
-                self.assertTrue(all(value is None for value in trace.initial_affinities))
+                    expected_aff,
+                    expected_center,
+                    expected_metadata,
+                )
 
     def test_hard_pre_sparse_preservation_matches_author_order(self):
         initial, affinity, residual_yx, confidence, sparse = self._inputs()
-        expected, expected_trace, _, _, _ = reference_nlspn(
+        (
+            expected,
+            expected_trace,
+            expected_aff,
+            expected_center,
+            expected_metadata,
+        ) = reference_nlspn(
             initial,
             affinity,
             residual_yx,
@@ -440,12 +516,23 @@ class NLSPNGoldenTest(unittest.TestCase):
             return_trace=True,
         )
         torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
-        for actual_step, expected_step in zip(trace.outputs, expected_trace, strict=True):
-            torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
+        self._assert_trace(
+            trace,
+            expected_trace,
+            expected_aff,
+            expected_center,
+            expected_metadata,
+        )
 
     def test_completionformer_temperature_100_matches_its_fork(self):
         initial, affinity, residual_yx, confidence, _ = self._inputs()
-        expected, expected_trace, _, _, _ = reference_nlspn(
+        (
+            expected,
+            expected_trace,
+            expected_aff,
+            expected_center,
+            expected_metadata,
+        ) = reference_nlspn(
             initial,
             affinity,
             residual_yx,
@@ -464,8 +551,53 @@ class NLSPNGoldenTest(unittest.TestCase):
             return_trace=True,
         )
         torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
-        for actual_step, expected_step in zip(trace.outputs, expected_trace, strict=True):
-            torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
+        self._assert_trace(
+            trace,
+            expected_trace,
+            expected_aff,
+            expected_center,
+            expected_metadata,
+        )
+
+    def test_singleton_height_matches_absolute_zero_padding_oracle(self):
+        initial = torch.tensor([[[[2.0, 4.0, 8.0]]]])
+        affinity = torch.zeros((1, 8, 1, 3))
+        affinity[:, 3] = 1.0
+        residual_yx = torch.zeros((1, 8, 2, 1, 3))
+        residual_yx[:, 3, 0] = 0.5
+        for name, config, temperature in (
+            (
+                "NLSPN",
+                SPNConfig.nlspn(
+                    iterations=1,
+                    normalization=NormalizationMode.AS,
+                    confidence=False,
+                ),
+                1.0,
+            ),
+            (
+                "CompletionFormer",
+                SPNConfig.completionformer(
+                    iterations=1,
+                    normalization=NormalizationMode.AS,
+                    confidence=False,
+                ),
+                100.0,
+            ),
+        ):
+            with self.subTest(profile=name):
+                expected, _, _, _, _ = reference_nlspn(
+                    initial,
+                    affinity,
+                    residual_yx,
+                    iterations=1,
+                    mode="AS",
+                    temperature=temperature,
+                )
+                actual = UnifiedSPN(config)(
+                    SPNInputs(initial, affinity, offsets=residual_yx)
+                )
+                torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
 
     def test_legacy_confidence_offsets_include_the_base_stencil(self):
         initial, affinity, residual_yx, confidence, _ = self._inputs()
