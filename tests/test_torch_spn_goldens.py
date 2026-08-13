@@ -275,18 +275,74 @@ class TorchSPNValidationTest(unittest.TestCase):
             )
 
     @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "CUDA unavailable")
-    def test_cpu_metadata_is_moved_to_cuda_state_device(self):
-        current = torch.randn((1, 1, 3, 4), device="cuda")
-        output = UnifiedSPN(SPNConfig.nlspn(iterations=1))(
-            SPNInputs(
-                current=current,
-                initial=torch.randn((1, 1, 3, 4)),
-                affinity=torch.randn((1, 8, 3, 4)),
-                offsets=torch.randn((1, 8, 2, 3, 4)) * 0.1,
-                confidence=torch.sigmoid(torch.randn((1, 1, 3, 4))),
-            )
+    def test_each_named_profile_moves_cpu_metadata_to_cuda_state_device(self):
+        shape = (1, 1, 3, 4)
+        current = torch.randn(shape, device="cuda")
+        initial = torch.randn(shape)
+        sparse = torch.zeros(shape)
+        sparse[:, :, 1, 2] = 2.0
+        confidence = torch.randn(shape)
+        cases = (
+            (
+                "cspn",
+                SPNConfig.cspn(iterations=1),
+                SPNInputs(
+                    current=current,
+                    initial=initial,
+                    affinity=torch.randn((1, 8, 3, 4)),
+                ),
+            ),
+            (
+                "nlspn",
+                SPNConfig.nlspn(iterations=1),
+                SPNInputs(
+                    current=current,
+                    initial=initial,
+                    affinity=torch.randn((1, 8, 3, 4)),
+                    offsets=torch.randn((1, 8, 2, 3, 4)) * 0.1,
+                    confidence=torch.sigmoid(confidence),
+                ),
+            ),
+            (
+                "completionformer",
+                SPNConfig.completionformer(iterations=1),
+                SPNInputs(
+                    current=current,
+                    initial=initial,
+                    affinity=torch.randn((1, 8, 3, 4)),
+                    offsets=torch.randn((1, 8, 2, 3, 4)) * 0.1,
+                    confidence=torch.sigmoid(confidence),
+                ),
+            ),
+            (
+                "dyspn",
+                SPNConfig.dyspn(iterations=1),
+                SPNInputs(
+                    current=current,
+                    initial=initial,
+                    affinity=torch.randn((1, 1, 5, 3, 4)),
+                    offsets=torch.randn((1, 1, 5, 2, 3, 4)) * 0.1,
+                    confidence=confidence,
+                    sparse_depth=sparse,
+                ),
+            ),
+            (
+                "dyspn_nlpm",
+                SPNConfig.dyspn_nlpm(iterations=1),
+                SPNInputs(
+                    current=current,
+                    initial=initial,
+                    affinity=torch.randn((1, 48, 3, 4)),
+                    attention=torch.randn((1, 1, 4, 3, 4)),
+                    confidence=torch.sigmoid(confidence),
+                    sparse_depth=sparse,
+                ),
+            ),
         )
-        self.assertEqual(output.device.type, "cuda")
+        for name, config, inputs in cases:
+            with self.subTest(profile=name):
+                output = UnifiedSPN(config)(inputs)
+                self.assertEqual(output.device.type, "cuda")
 
 
 def _randn(generator, shape, scale=1.0):
