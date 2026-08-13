@@ -286,5 +286,58 @@ class DySPNNLPMAuthorGoldenTest(unittest.TestCase):
         _assert_steps(self, trace.outputs, expected_steps)
 
 
+@unittest.skipUnless(torch is not None and torch.cuda.is_available(), "CUDA unavailable")
+class TorchSPNDeviceTest(unittest.TestCase):
+    def test_all_author_profiles_accept_cpu_metadata_with_cuda_state(self):
+        state = torch.ones((1, 1, 3, 4), device="cuda")
+        zeros = torch.zeros((1, 1, 3, 4))
+        cases = (
+            (
+                SPNConfig.cspn(iterations=1),
+                CSPNRawInputs(torch.ones((1, 8, 3, 4)), state),
+            ),
+            (
+                SPNConfig.nlspn(iterations=1),
+                NLSPNRawInputs(state, torch.ones((1, 8, 3, 4)), zeros),
+            ),
+            (
+                SPNConfig.completionformer(iterations=1),
+                CompletionFormerRawInputs(
+                    state,
+                    torch.ones((1, 8, 3, 4)),
+                    zeros,
+                    zeros,
+                ),
+            ),
+            (
+                SPNConfig.dyspn(iterations=1),
+                DySPNRawInputs(
+                    state,
+                    torch.ones((1, 5, 3, 4)),
+                    zeros,
+                    zeros,
+                ),
+            ),
+            (
+                SPNConfig.dyspn_nlpm(iterations=1),
+                DySPNNLPMRawInputs(
+                    state,
+                    torch.ones((1, 48, 3, 4)),
+                    torch.zeros((1, 4, 3, 4)),
+                    zeros,
+                    zeros,
+                ),
+            ),
+        )
+        for config, inputs in cases:
+            with self.subTest(profile=config.profile.name):
+                output, trace = UnifiedSPN(config).cuda()(
+                    inputs,
+                    return_trace=True,
+                )
+                self.assertEqual(output.device.type, "cuda")
+                self.assertEqual(trace.outputs[0].device.type, "cuda")
+
+
 if __name__ == "__main__":
     unittest.main()
