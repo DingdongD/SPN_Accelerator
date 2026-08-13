@@ -399,6 +399,16 @@ class NLSPNGoldenTest(unittest.TestCase):
         expected_center,
         metadata,
     ):
+        iterations = len(expected_outputs)
+        for field in (
+            "outputs",
+            "candidates",
+            "offsets",
+            "neighbor_affinities",
+            "current_affinities",
+            "initial_affinities",
+        ):
+            self.assertEqual(len(getattr(trace, field)), iterations, field)
         for actual_step, expected_step in zip(
             trace.outputs,
             expected_outputs,
