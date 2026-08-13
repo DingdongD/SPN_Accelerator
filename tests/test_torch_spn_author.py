@@ -10,7 +10,10 @@ if torch is not None:
     import torch.nn.functional as F
 
     from spn_accel_cmodel.torch_spn_author import (
+        AUTHOR_BUILDERS,
+        CSPNAuthor,
         CompletionFormerAuthor,
+        DySPNNLPMAuthor,
         DySPNAuthor,
         NLSPNAuthor,
     )
@@ -22,6 +25,7 @@ if torch is not None:
         DySPNRawInputs,
         NLSPNRawInputs,
         SPNConfig,
+        SPNProfile,
     )
 
 
@@ -265,6 +269,108 @@ class DySPNAuthorDecoderTest(unittest.TestCase):
         del missing["module.dyspn_2_5.conv_offset_aff.bias"]
         with self.assertRaisesRegex(ValueError, "conv_offset_aff.bias"):
             author.load_official_parameters(missing, prefix="module.dyspn_2_5.")
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class CSPNAuthorDecoderTest(unittest.TestCase):
+    def test_maps_official_inputs_without_generating_parameters(self):
+        guidance = torch.randn((1, 8, 3, 4))
+        initial = torch.randn((1, 1, 3, 4))
+        sparse = torch.zeros_like(initial)
+        author = CSPNAuthor(SPNConfig.cspn(iterations=2))
+        decoded = author.decode(CSPNRawInputs(guidance, initial, sparse))
+        torch.testing.assert_close(decoded.current, initial)
+        torch.testing.assert_close(decoded.initial, initial)
+        torch.testing.assert_close(decoded.raw_affinity, guidance)
+        self.assertIs(decoded.sparse_depth, sparse)
+        self.assertIsNone(decoded.residual_offsets_yx)
+        self.assertIsNone(decoded.attention_logits)
+        self.assertEqual(sum(parameter.numel() for parameter in author.parameters()), 0)
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class DySPNNLPMAuthorDecoderTest(unittest.TestCase):
+    def test_reshapes_dynamic_logits_without_sigmoid(self):
+        generator = torch.Generator().manual_seed(8301)
+        initial = torch.randn((1, 1, 3, 4), generator=generator)
+        guidance = torch.randn((1, 48, 3, 4), generator=generator)
+        dynamic = torch.randn((1, 8, 3, 4), generator=generator)
+        sparse = torch.zeros_like(initial)
+        confidence = torch.sigmoid(torch.randn(initial.shape, generator=generator))
+        author = DySPNNLPMAuthor(SPNConfig.dyspn_nlpm(iterations=2))
+        decoded = author.decode(
+            DySPNNLPMRawInputs(
+                initial,
+                guidance,
+                dynamic,
+                sparse,
+                confidence,
+            )
+        )
+        torch.testing.assert_close(
+            decoded.attention_logits,
+            dynamic.view(1, 2, 4, 3, 4),
+        )
+        torch.testing.assert_close(decoded.raw_affinity, guidance)
+        self.assertIs(decoded.confidence_probability, confidence)
+        self.assertEqual(sum(parameter.numel() for parameter in author.parameters()), 0)
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class AuthorInputValidationTest(unittest.TestCase):
+    def test_builder_table_contains_exactly_five_author_profiles(self):
+        self.assertEqual(
+            set(AUTHOR_BUILDERS),
+            {
+                SPNProfile.CSPN,
+                SPNProfile.NLSPN,
+                SPNProfile.COMPLETIONFORMER,
+                SPNProfile.DYSPN,
+                SPNProfile.DYSPN_NLPM,
+            },
+        )
+
+    def test_each_author_rejects_another_profiles_input_type(self):
+        image = torch.zeros((1, 1, 3, 4))
+        wrong = CSPNRawInputs(torch.zeros((1, 8, 3, 4)), image)
+        cases = (
+            NLSPNAuthor(SPNConfig.nlspn()),
+            CompletionFormerAuthor(SPNConfig.completionformer()),
+            DySPNAuthor(SPNConfig.dyspn()),
+            DySPNNLPMAuthor(SPNConfig.dyspn_nlpm()),
+        )
+        for author in cases:
+            with self.subTest(author=type(author).__name__):
+                with self.assertRaisesRegex(TypeError, "expects"):
+                    author.decode(wrong)
+
+    def test_cspn_and_nlpm_reject_wrong_author_channels(self):
+        image = torch.zeros((1, 1, 3, 4))
+        with self.assertRaisesRegex(ValueError, "guidance"):
+            CSPNAuthor(SPNConfig.cspn()).decode(
+                CSPNRawInputs(torch.zeros((1, 7, 3, 4)), image)
+            )
+        nlpm = DySPNNLPMAuthor(SPNConfig.dyspn_nlpm(iterations=2))
+        with self.assertRaisesRegex(ValueError, "guidance"):
+            nlpm.decode(
+                DySPNNLPMRawInputs(
+                    image,
+                    torch.zeros((1, 47, 3, 4)),
+                    torch.zeros((1, 8, 3, 4)),
+                    image,
+                    image,
+                )
+            )
+        with self.assertRaisesRegex(ValueError, "dynamic_logits"):
+            nlpm.decode(
+                DySPNNLPMRawInputs(
+                    image,
+                    torch.zeros((1, 48, 3, 4)),
+                    torch.zeros((1, 7, 3, 4)),
+                    image,
+                    image,
+                )
+            )
 
 
 if __name__ == "__main__":

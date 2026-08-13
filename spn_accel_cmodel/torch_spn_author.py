@@ -10,7 +10,9 @@ import torch.nn as nn
 from .torch_spn_core import as_nchw
 from .torch_spn_decoded import DecodedSPNParameters
 from .torch_spn_types import (
+    CSPNRawInputs,
     CompletionFormerRawInputs,
+    DySPNNLPMRawInputs,
     DySPNRawInputs,
     NLSPNRawInputs,
     NormalizationMode,
@@ -221,3 +223,103 @@ class DySPNAuthor(nn.Module, _OfficialParameterLoader):
             confidence_logits=confidence,
             sparse_depth=sparse,
         )
+
+
+class CSPNAuthor(nn.Module):
+    input_type = CSPNRawInputs
+    profile = SPNProfile.CSPN
+
+    def __init__(self, config: SPNConfig):
+        super().__init__()
+        if config.profile is not self.profile:
+            raise ValueError("CSPNAuthor requires CSPN config")
+        self.config = config
+
+    def decode(self, inputs: CSPNRawInputs) -> DecodedSPNParameters:
+        if not isinstance(inputs, self.input_type):
+            raise TypeError(
+                f"CSPN expects CSPNRawInputs, got {type(inputs).__name__}"
+            )
+        current = as_nchw(inputs.blur_depth, "blur_depth")
+        guidance = _guidance(
+            inputs.guidance,
+            current,
+            self.config.num_neighbors,
+            "guidance",
+        )
+        sparse = None
+        if inputs.sparse_depth is not None:
+            sparse = as_nchw(
+                inputs.sparse_depth,
+                "sparse_depth",
+                device=current.device,
+            )
+            if sparse.shape != current.shape:
+                raise ValueError("sparse_depth must have the same shape as blur_depth")
+        return DecodedSPNParameters(
+            current=current,
+            initial=current,
+            raw_affinity=guidance,
+            sparse_depth=sparse,
+        )
+
+
+class DySPNNLPMAuthor(nn.Module):
+    input_type = DySPNNLPMRawInputs
+    profile = SPNProfile.DYSPN_NLPM
+
+    def __init__(self, config: SPNConfig):
+        super().__init__()
+        if config.profile is not self.profile:
+            raise ValueError("DySPNNLPMAuthor requires DYSPN_NLPM config")
+        self.config = config
+
+    def decode(self, inputs: DySPNNLPMRawInputs) -> DecodedSPNParameters:
+        if not isinstance(inputs, self.input_type):
+            raise TypeError(
+                "DYSPN_NLPM expects DySPNNLPMRawInputs, "
+                f"got {type(inputs).__name__}"
+            )
+        current = as_nchw(inputs.feat_init, "feat_init")
+        guidance = _guidance(inputs.guidance, current, 48, "guidance")
+        dynamic = _guidance(
+            inputs.dynamic_logits,
+            current,
+            4 * self.config.iterations,
+            "dynamic_logits",
+        )
+        sparse = as_nchw(inputs.sparse_depth, "sparse_depth", device=current.device)
+        confidence = as_nchw(
+            inputs.confidence_probability,
+            "confidence_probability",
+            device=current.device,
+        )
+        if sparse.shape != current.shape:
+            raise ValueError("sparse_depth must have the same shape as feat_init")
+        if confidence.shape != current.shape:
+            raise ValueError(
+                "confidence_probability must have the same shape as feat_init"
+            )
+        return DecodedSPNParameters(
+            current=current,
+            initial=current,
+            raw_affinity=guidance,
+            attention_logits=dynamic.view(
+                current.shape[0],
+                self.config.iterations,
+                4,
+                current.shape[2],
+                current.shape[3],
+            ),
+            confidence_probability=confidence,
+            sparse_depth=sparse,
+        )
+
+
+AUTHOR_BUILDERS = {
+    SPNProfile.CSPN: CSPNAuthor,
+    SPNProfile.NLSPN: NLSPNAuthor,
+    SPNProfile.COMPLETIONFORMER: CompletionFormerAuthor,
+    SPNProfile.DYSPN: DySPNAuthor,
+    SPNProfile.DYSPN_NLPM: DySPNNLPMAuthor,
+}
