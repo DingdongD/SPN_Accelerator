@@ -14,6 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .torch_spn_core import propagate_canonical, validate_plan
 from .torch_spn_types import CanonicalSPNPlan, ReductionMode
 
 
