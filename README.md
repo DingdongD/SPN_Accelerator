@@ -102,9 +102,31 @@ The current baseline result is an **architecture-model prediction**, not a calib
 ## Torch propagation goldens
 
 `spn_accel_cmodel.torch_functional` provides a propagation-only FP32 model for
-the released CSPN, NLSPN, CompletionFormer, and DySPN implementations.  It does
+the released CSPN, NLSPN, CompletionFormer, and DySPN implementations. It does
 not include the CNN/Transformer heads that predict initial depth, offsets,
 affinity, confidence, or attention.
+
+All named profiles now execute the same recurrence. A profile adapter only
+translates author-layout metadata into a `CanonicalSPNPlan`; it never advances
+the depth state. `propagate_canonical()` is the sole owner of the propagation
+iteration loop, while `UnifiedSPN` is a thin compile-and-dispatch API:
+
+```text
+official tensors -> compile_<profile>_plan() -> CanonicalSPNPlan
+                                                    |
+current + initial ----------------------------------+
+                                                    v
+                                      propagate_canonical()
+```
+
+The implementation is split accordingly:
+
+- `torch_spn_types.py`: public configuration, plan, and trace types;
+- `torch_spn_adapters.py`: CSPN/NLSPN/CompletionFormer/DySPN/NLPM metadata
+  compilers;
+- `torch_spn_core.py`: sampling, reduction, sparse fusion, and the one canonical
+  recurrence;
+- `torch_functional.py`: stable public exports and the `UnifiedSPN` wrapper.
 
 Canonical profiles preserve the author-code distinctions rather than treating
 all SPNs as an eight-neighbor absolute-sum kernel:
@@ -135,6 +157,15 @@ output, trace = model(
 )
 ```
 
+The compiled-plan boundary can also be tested or integrated directly:
+
+```python
+from spn_accel_cmodel import compile_nlspn_plan, propagate_canonical
+
+plan = compile_nlspn_plan(config, inputs, current, initial)
+output, trace = propagate_canonical(current, initial, plan, return_trace=True)
+```
+
 Run the independent author-formula differential suite:
 
 ```bash
@@ -148,13 +179,13 @@ effective affinity and anchor coefficients.  Integer microcases use exact
 checks where operation ordering allows; interpolated FP32 paths use
 `rtol=1e-5, atol=1e-6`.
 
-NLSPN and CompletionFormer use DCNv2 as the carrier for deformable gather,
-bilinear interpolation, affinity multiplication, and reduction.  DCNv2 is
-therefore related to propagation implementation, but compiling it is not
-required for these Torch goldens: tests inject identical state, offset,
-affinity, confidence, and sparse tensors directly at the propagation boundary.
-An installed official CUDA extension can be used as an additional carrier
-check, but is not a CPU-CI dependency.
+Released NLSPN and CompletionFormer repositories use DCNv2 as an implementation
+carrier for deformable gather and weighted reduction. DCNv2 is not part of the
+propagation abstraction or a dependency of this Torch model. The differential
+tests inject identical state, offset, affinity, confidence, and sparse tensors
+at the propagation boundary, so they validate the mapping and recurrence
+without building the CUDA extension. An installed official extension can still
+serve as an optional carrier-level integration check.
 
 ## Validation chain
 

@@ -15,7 +15,23 @@ attention, confidence, and sparse anchors remain outside this module. DCNv2 is
 not part of the canonical algorithm; it is only the gather carrier used by the
 released NLSPN and CompletionFormer implementations.
 
-## Problem in the Current Implementation
+## Implementation Map
+
+The implemented boundary follows this specification directly:
+
+- `spn_accel_cmodel/torch_spn_types.py` defines `CanonicalSPNPlan` and the
+  public configuration/input/trace types;
+- `spn_accel_cmodel/torch_spn_adapters.py` compiles author metadata without
+  advancing the propagated state;
+- `spn_accel_cmodel/torch_spn_core.py` owns canonical sampling, reduction,
+  fusion, validation, and the only iteration loop;
+- `spn_accel_cmodel/torch_functional.py` preserves `UnifiedSPN` as a thin
+  public compile-and-execute wrapper.
+
+Callers may use `UnifiedSPN` or compile a plan and invoke
+`propagate_canonical()` directly. Both paths reach the same recurrence.
+
+## Pre-refactor Problem
 
 The existing `UnifiedSPN` exposes a common API but dispatches propagation to
 `_forward_cspn`, `_forward_nlspn`, `_forward_dyspn`,
