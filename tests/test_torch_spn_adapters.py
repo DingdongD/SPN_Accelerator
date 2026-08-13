@@ -174,8 +174,38 @@ class NLSPNPlanTest(unittest.TestCase):
         torch.testing.assert_close(plan.pre_fusion_gate[:, 0], (sparse > 0).float())
         torch.testing.assert_close(plan.pre_fusion_value[:, 0], sparse)
 
+    def test_tgass_uses_loaded_affinity_scale(self):
+        config = SPNConfig.nlspn(iterations=1)
+        loaded_scale = 3.25
+        expected, _, affinity, center, _ = reference_nlspn(
+            self.initial,
+            self.affinity,
+            self.residual_yx,
+            iterations=1,
+            mode="TGASS",
+            confidence=self.confidence,
+            gamma=loaded_scale / config.num_neighbors,
+        )
+        decoded = self._decoded(
+            affinity_scale=torch.tensor([loaded_scale]),
+        )
+        plan = compile_nlspn_plan(config, decoded)
+
+        torch.testing.assert_close(
+            plan.neighbor_affinity[:, 0, :, 0],
+            affinity,
+            rtol=1.0e-5,
+            atol=1.0e-6,
+        )
+        torch.testing.assert_close(plan.current_affinity[:, 0], center)
+        actual = propagate_canonical(self.initial, self.initial, plan)
+        torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
-class CompletionFormerPlanTest(NLSPNPlanTest):
+class CompletionFormerPlanTest(unittest.TestCase):
+    setUp = NLSPNPlanTest.setUp
+    _decoded = NLSPNPlanTest._decoded
+
     def test_temperature_100_compiles_completionformer_coefficients(self):
         config = SPNConfig.completionformer(iterations=2)
         expected, _, affinity, center, _ = reference_nlspn(
