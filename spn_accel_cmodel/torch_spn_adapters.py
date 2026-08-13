@@ -325,3 +325,81 @@ def compile_completionformer_plan(
         initial,
         temperature=100.0,
     )
+
+
+def compile_dyspn_plan(
+    config: SPNConfig,
+    inputs: SPNInputs,
+    current: torch.Tensor,
+    initial: torch.Tensor,
+) -> CanonicalSPNPlan:
+    del initial
+    logits = inputs.affinity.to(device=current.device, dtype=torch.float32)
+    expected_affinity = (
+        current.shape[0],
+        config.iterations,
+        config.num_neighbors,
+        current.shape[2],
+        current.shape[3],
+    )
+    if tuple(logits.shape) != expected_affinity:
+        raise ValueError(
+            f"per-iteration affinity must have shape {expected_affinity}, "
+            f"got {tuple(logits.shape)}"
+        )
+    if inputs.offsets is None:
+        raise ValueError("DySPN requires per-iteration offsets")
+    residual_yx = inputs.offsets.to(device=current.device, dtype=torch.float32)
+    expected_offsets = (
+        current.shape[0],
+        config.iterations,
+        config.num_neighbors,
+        2,
+        current.shape[2],
+        current.shape[3],
+    )
+    if tuple(residual_yx.shape) != expected_offsets:
+        raise ValueError(
+            f"DySPN offsets must have shape {expected_offsets}, "
+            f"got {tuple(residual_yx.shape)}"
+        )
+    residual_xy = residual_yx[:, :, :, [1, 0]]
+    base = torch.tensor(
+        config.base_offsets_xy,
+        device=current.device,
+        dtype=torch.float32,
+    ).view(1, 1, config.num_neighbors, 2, 1, 1)
+    offsets_xy = base + residual_xy
+    affinity = torch.softmax(logits, dim=2).unsqueeze(3)
+
+    if inputs.sparse_depth is None:
+        raise ValueError("DySPN soft-post fusion requires sparse_depth")
+    sparse = as_nchw(inputs.sparse_depth, "sparse_depth", device=current.device)
+    if sparse.shape != current.shape:
+        raise ValueError("sparse_depth must have the same shape as current")
+    if inputs.confidence is None:
+        raise ValueError("DySPN soft-post fusion requires confidence logits")
+    confidence_logits = as_nchw(
+        inputs.confidence,
+        "confidence",
+        device=current.device,
+    )
+    if confidence_logits.shape != current.shape:
+        raise ValueError("DySPN confidence must have the same shape as current")
+    post_gate = (torch.sigmoid(confidence_logits) * sparse.sign()).unsqueeze(1)
+    post_value = sparse.unsqueeze(1)
+    zeros = torch.zeros(
+        (current.shape[0], 1, 1, current.shape[2], current.shape[3]),
+        device=current.device,
+    )
+    return _make_plan(
+        config=config,
+        current=current,
+        offsets_xy=offsets_xy,
+        neighbor_affinity=affinity,
+        current_affinity=zeros,
+        initial_affinity=zeros,
+        post_gate=post_gate,
+        post_value=post_value,
+        reduction_mode=ReductionMode.SEQUENTIAL,
+    )

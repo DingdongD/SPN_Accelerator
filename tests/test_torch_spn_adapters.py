@@ -7,10 +7,15 @@ except ImportError:  # pragma: no cover - optional validation dependency
     torch = None
 
 if torch is not None:
-    from official_spn_references import reference_cspn, reference_nlspn
+    from official_spn_references import (
+        reference_cspn,
+        reference_dyspn,
+        reference_nlspn,
+    )
     from spn_accel_cmodel.torch_spn_adapters import (
         compile_completionformer_plan,
         compile_cspn_plan,
+        compile_dyspn_plan,
         compile_nlspn_plan,
     )
     from spn_accel_cmodel.torch_spn_core import propagate_canonical
@@ -211,6 +216,81 @@ class CompletionFormerPlanTest(NLSPNPlanTest):
         torch.testing.assert_close(plan.current_affinity[:, 0], center)
         actual = propagate_canonical(self.initial, self.initial, plan)
         torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class DySPNPlanTest(unittest.TestCase):
+    def test_all_released_stencils_compile_per_iteration_metadata(self):
+        for neighbors in (1, 3, 5, 9):
+            with self.subTest(neighbors=neighbors):
+                generator = torch.Generator().manual_seed(8100 + neighbors)
+                steps, height, width = 3, 3, 4
+                initial = torch.randn((1, 1, height, width), generator=generator)
+                residual_yx = torch.randn(
+                    (1, steps, neighbors, 2, height, width),
+                    generator=generator,
+                ) * 0.2
+                logits = torch.randn(
+                    (1, steps, neighbors, height, width),
+                    generator=generator,
+                )
+                sparse = torch.zeros_like(initial)
+                sparse[:, :, 1, 2] = 5.0
+                confidence_logits = torch.randn(
+                    (1, 1, height, width),
+                    generator=generator,
+                )
+                inputs = SPNInputs(
+                    initial,
+                    logits,
+                    offsets=residual_yx,
+                    confidence=confidence_logits,
+                    sparse_depth=sparse,
+                )
+                expected, _, _, metadata = reference_dyspn(
+                    initial,
+                    residual_yx,
+                    logits,
+                    sparse,
+                    confidence_logits,
+                )
+                plan = compile_dyspn_plan(
+                    SPNConfig.dyspn(iterations=steps, num_neighbors=neighbors),
+                    inputs,
+                    initial,
+                    initial,
+                )
+                self.assertEqual(
+                    plan.offsets_xy.shape,
+                    (1, steps, neighbors, 2, height, width),
+                )
+                self.assertEqual(
+                    plan.neighbor_affinity.shape,
+                    (1, steps, neighbors, 1, height, width),
+                )
+                torch.testing.assert_close(
+                    plan.neighbor_affinity[:, :, :, 0],
+                    torch.softmax(logits, dim=2),
+                )
+                for iteration, expected_offsets in enumerate(metadata["offsets"]):
+                    torch.testing.assert_close(
+                        plan.offsets_xy[:, iteration],
+                        expected_offsets,
+                        rtol=0.0,
+                        atol=0.0,
+                    )
+                self.assertIs(plan.reduction_mode, ReductionMode.SEQUENTIAL)
+                torch.testing.assert_close(
+                    plan.post_fusion_gate[:, 0],
+                    torch.sigmoid(confidence_logits) * sparse.sign(),
+                )
+                torch.testing.assert_close(plan.post_fusion_value[:, 0], sparse)
+                torch.testing.assert_close(
+                    plan.current_affinity,
+                    torch.zeros_like(plan.current_affinity),
+                )
+                actual = propagate_canonical(initial, initial, plan)
+                torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
 
 
 if __name__ == "__main__":
