@@ -7,6 +7,7 @@ except ImportError:  # pragma: no cover - optional validation dependency
     torch = None
 
 if torch is not None:
+    from spn_accel_cmodel import torch_spn_types
     from spn_accel_cmodel.torch_functional import (
         CanonicalSPNPlan,
         ReductionMode,
@@ -24,6 +25,10 @@ class CanonicalTypeTest(unittest.TestCase):
             SPNConfig.completionformer().profile,
             SPNProfile.COMPLETIONFORMER,
         )
+
+    def test_public_types_are_the_canonical_type_objects(self):
+        self.assertIs(SPNConfig, torch_spn_types.SPNConfig)
+        self.assertIs(SPNProfile, torch_spn_types.SPNProfile)
         self.assertIs(SPNConfig.dyspn().profile, SPNProfile.DYSPN)
         self.assertTrue(hasattr(CanonicalSPNPlan, "__dataclass_fields__"))
         self.assertEqual(

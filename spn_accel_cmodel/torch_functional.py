@@ -335,6 +335,29 @@ class SPNTrace:
     initial_affinities: list[torch.Tensor | None] = field(default_factory=list)
 
 
+# Rebind the compatibility module to the canonical type objects.  The legacy
+# definitions above remain only until the propagation wrapper is replaced in
+# the final unification task.
+from .torch_spn_types import (  # noqa: E402
+    AffinityLayout,
+    AffinityMode,
+    AnchorMode,
+    DYSPN_BASE_XY as _DYSPN_BASE_XY,
+    GRID8_XY as _GRID8_XY,
+    NeighborConfidenceMode,
+    NeighborMode,
+    NormalizationMode,
+    OffsetMode,
+    PaddingMode,
+    SPNConfig,
+    SPNInputs,
+    SPNProfile,
+    SPNTrace,
+    SamplingMode,
+    SparseFusionMode,
+)
+
+
 class UnifiedSPN(nn.Module):
     def __init__(self, config: SPNConfig):
         super().__init__()
