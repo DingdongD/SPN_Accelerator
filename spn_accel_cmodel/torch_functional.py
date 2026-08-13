@@ -137,6 +137,7 @@ class SPNConfig:
     tanh_temperature: float = 1.0
     affinity_gamma: float = 0.5
     align_corners: bool = True
+    legacy_confidence_offsets: bool = False
     base_offsets_xy: tuple[tuple[float, float], ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
@@ -190,6 +191,7 @@ class SPNConfig:
         confidence: bool = True,
         preserve_input: bool = False,
         affinity_gamma: float = 0.5,
+        legacy_confidence_offsets: bool = False,
     ) -> "SPNConfig":
         if normalization not in {
             NormalizationMode.AS,
@@ -220,6 +222,7 @@ class SPNConfig:
             tanh_temperature=1.0,
             affinity_gamma=affinity_gamma,
             align_corners=True,
+            legacy_confidence_offsets=legacy_confidence_offsets,
             base_offsets_xy=_GRID8_XY,
         )
 
@@ -232,6 +235,7 @@ class SPNConfig:
         confidence: bool = True,
         preserve_input: bool = False,
         affinity_gamma: float = 0.5,
+        legacy_confidence_offsets: bool = False,
     ) -> "SPNConfig":
         cfg = cls.nlspn(
             iterations,
@@ -239,6 +243,7 @@ class SPNConfig:
             confidence=confidence,
             preserve_input=preserve_input,
             affinity_gamma=affinity_gamma,
+            legacy_confidence_offsets=legacy_confidence_offsets,
         )
         return cls(
             **{
@@ -324,7 +329,261 @@ class UnifiedSPN(nn.Module):
         *,
         return_trace: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, SPNTrace]:
-        raise NotImplementedError("propagation profiles are implemented in the next TDD task")
+        current = _as_nchw(inputs.current, "current")
+        initial = (
+            _as_nchw(inputs.initial, "initial")
+            if inputs.initial is not None
+            else current
+        )
+        if initial.shape != current.shape:
+            raise ValueError("initial and current must have identical shapes")
+
+        if self.config.profile is SPNProfile.CSPN:
+            state, trace = self._forward_cspn(inputs, current, initial)
+        elif self.config.profile in {SPNProfile.NLSPN, SPNProfile.COMPLETIONFORMER}:
+            state, trace = self._forward_nlspn(inputs, current, initial)
+        else:
+            state, trace = self._forward_general(inputs, current, initial)
+        return (state, trace) if return_trace else state
+
+    def _forward_cspn(
+        self,
+        inputs: SPNInputs,
+        current: torch.Tensor,
+        initial: torch.Tensor,
+    ) -> tuple[torch.Tensor, SPNTrace]:
+        cfg = self.config
+        guidance = _as_neighbor_map(
+            inputs.affinity,
+            current,
+            cfg.num_neighbors,
+            "affinity",
+        )
+        shifted_guidance = _cspn_shifted_channels(guidance)
+        denom = torch.sum(torch.abs(shifted_guidance), dim=1, keepdim=True)
+        normalized = shifted_guidance / denom
+        neighbor_sum = torch.sum(normalized, dim=1)[:, :, 1:-1, 1:-1]
+        initial_affinity = 1.0 - neighbor_sum
+
+        trace = SPNTrace()
+        state = current
+        sparse = None
+        mask = None
+        if cfg.sparse_fusion is SparseFusionMode.CSPN_CODE_POST:
+            sparse = _required_sparse(inputs, current)
+            mask = sparse.sign()
+
+        for _ in range(cfg.iterations):
+            shifted_state = _cspn_shifted_channels(state)
+            neighbor = torch.sum(normalized * shifted_state, dim=1)
+            neighbor = neighbor[:, :, 1:-1, 1:-1]
+            candidate = neighbor + initial_affinity * initial
+            if mask is not None:
+                state = (1.0 - mask) * candidate + mask * initial
+            else:
+                state = candidate
+            trace.candidates.append(candidate)
+            trace.outputs.append(state)
+            trace.offsets.append(base_offsets_tensor(cfg.base_offsets_xy, current))
+            trace.neighbor_affinities.append(
+                normalized[:, :, 0, 1:-1, 1:-1]
+            )
+            trace.current_affinities.append(None)
+            trace.initial_affinities.append(initial_affinity)
+        return state, trace
+
+    def _forward_nlspn(
+        self,
+        inputs: SPNInputs,
+        current: torch.Tensor,
+        initial: torch.Tensor,
+    ) -> tuple[torch.Tensor, SPNTrace]:
+        cfg = self.config
+        affinity = _as_neighbor_map(
+            inputs.affinity,
+            current,
+            cfg.num_neighbors,
+            "affinity",
+        )
+        residual_xy, total_xy = _static_residual_offsets(inputs, current, cfg)
+
+        if cfg.normalization in {NormalizationMode.TC, NormalizationMode.TGASS}:
+            scale = (
+                float(cfg.num_neighbors)
+                if cfg.normalization is NormalizationMode.TC
+                else cfg.affinity_gamma * float(cfg.num_neighbors) + 1.0e-8
+            )
+            affinity = torch.tanh(affinity / cfg.tanh_temperature) / scale
+
+        if cfg.neighbor_confidence is NeighborConfidenceMode.SAMPLE_AT_NEIGHBOR:
+            if inputs.confidence is None:
+                raise ValueError("neighbor confidence sampling requires confidence")
+            confidence = _as_nchw(inputs.confidence, "confidence")
+            if (
+                confidence.shape[1] != 1
+                or confidence.shape[0] != current.shape[0]
+                or confidence.shape[2:] != current.shape[2:]
+            ):
+                raise ValueError("confidence must have shape [B,1,H,W]")
+            confidence_offsets = total_xy if cfg.legacy_confidence_offsets else residual_xy
+            sampled_confidence = sample_neighbors(
+                confidence,
+                confidence_offsets.detach(),
+                cfg.sampling_mode,
+                cfg.padding_mode,
+                align_corners=cfg.align_corners,
+            )[:, :, 0]
+            affinity = affinity * sampled_confidence
+
+        denom = torch.sum(torch.abs(affinity), dim=1, keepdim=True) + cfg.eps
+        if cfg.normalization in {NormalizationMode.ASS, NormalizationMode.TGASS}:
+            denom = torch.where(denom < 1.0, torch.ones_like(denom), denom)
+        if cfg.normalization in {
+            NormalizationMode.AS,
+            NormalizationMode.ASS,
+            NormalizationMode.TGASS,
+        }:
+            affinity = affinity / denom
+        current_affinity = 1.0 - torch.sum(affinity, dim=1, keepdim=True)
+
+        sparse = None
+        mask = None
+        if cfg.sparse_fusion is SparseFusionMode.HARD_PRE:
+            sparse = _required_sparse(inputs, current)
+            mask = _sparse_mask(inputs, sparse, current)
+
+        trace = SPNTrace()
+        state = current
+        for _ in range(cfg.iterations):
+            if mask is not None:
+                state = (1.0 - mask) * state + mask * sparse
+            samples = sample_neighbors(
+                state,
+                total_xy,
+                cfg.sampling_mode,
+                cfg.padding_mode,
+                align_corners=cfg.align_corners,
+            )
+            candidate = torch.sum(samples * affinity[:, :, None], dim=1)
+            candidate = candidate + current_affinity * state
+            state = candidate
+            trace.candidates.append(candidate)
+            trace.outputs.append(state)
+            trace.offsets.append(total_xy)
+            trace.neighbor_affinities.append(affinity)
+            trace.current_affinities.append(current_affinity)
+            trace.initial_affinities.append(None)
+        return state, trace
+
+    def _forward_general(
+        self,
+        inputs: SPNInputs,
+        current: torch.Tensor,
+        initial: torch.Tensor,
+    ) -> tuple[torch.Tensor, SPNTrace]:
+        raise NotImplementedError(
+            f"profile {self.config.profile.name} is implemented in the DySPN TDD task"
+        )
+
+
+def _as_nchw(value: torch.Tensor, name: str) -> torch.Tensor:
+    if value.ndim != 4:
+        raise ValueError(f"{name} must be NCHW, got {tuple(value.shape)}")
+    return value.to(dtype=torch.float32)
+
+
+def _as_neighbor_map(
+    value: torch.Tensor,
+    current: torch.Tensor,
+    neighbors: int,
+    name: str,
+) -> torch.Tensor:
+    tensor = value.to(device=current.device, dtype=torch.float32)
+    b, _, h, w = current.shape
+    if tensor.ndim == 1 and tensor.shape[0] == neighbors:
+        tensor = tensor.view(1, neighbors, 1, 1)
+    elif tensor.ndim == 2 and tensor.shape[1] == neighbors:
+        tensor = tensor.view(tensor.shape[0], neighbors, 1, 1)
+    elif tensor.ndim != 4:
+        raise ValueError(
+            f"{name} must have shape [K], [B,K], or [B,K,H,W], got "
+            f"{tuple(value.shape)}"
+        )
+    if tensor.shape[1] != neighbors:
+        raise ValueError(f"{name} expected {neighbors} channels, got {tensor.shape[1]}")
+    try:
+        return tensor.expand(b, neighbors, h, w)
+    except RuntimeError as exc:
+        raise ValueError(f"{name} cannot broadcast to [B,K,H,W]") from exc
+
+
+def _static_residual_offsets(
+    inputs: SPNInputs,
+    current: torch.Tensor,
+    cfg: SPNConfig,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if inputs.offsets is None:
+        raise ValueError("offset propagation requires offsets")
+    offsets = inputs.offsets.to(device=current.device, dtype=torch.float32)
+    expected = (
+        current.shape[0],
+        cfg.num_neighbors,
+        2,
+        current.shape[2],
+        current.shape[3],
+    )
+    if tuple(offsets.shape) != expected:
+        raise ValueError(f"offsets must have shape {expected}, got {tuple(offsets.shape)}")
+    if cfg.offset_mode is OffsetMode.RESIDUAL_YX:
+        residual_xy = offsets[:, :, [1, 0]]
+    elif cfg.offset_mode is OffsetMode.RESIDUAL_XY:
+        residual_xy = offsets
+    else:
+        residual_xy = offsets
+    if cfg.offset_mode is OffsetMode.ABSOLUTE_XY:
+        return residual_xy, residual_xy
+    base = base_offsets_tensor(cfg.base_offsets_xy, current)
+    return residual_xy, base + residual_xy
+
+
+def _cspn_shifted_channels(value: torch.Tensor) -> torch.Tensor:
+    paddings = (
+        (0, 2, 0, 2),
+        (1, 1, 0, 2),
+        (2, 0, 0, 2),
+        (0, 2, 1, 1),
+        (2, 0, 1, 1),
+        (0, 2, 2, 0),
+        (1, 1, 2, 0),
+        (2, 0, 2, 0),
+    )
+    channels = [value] * 8 if value.shape[1] == 1 else list(torch.chunk(value, 8, dim=1))
+    return torch.stack(
+        [F.pad(channel, padding) for channel, padding in zip(channels, paddings)],
+        dim=1,
+    )
+
+
+def _required_sparse(inputs: SPNInputs, current: torch.Tensor) -> torch.Tensor:
+    if inputs.sparse_depth is None:
+        raise ValueError("configured sparse fusion requires sparse_depth")
+    sparse = _as_nchw(inputs.sparse_depth, "sparse_depth").to(device=current.device)
+    if sparse.shape != current.shape:
+        raise ValueError("sparse_depth must have the same shape as current")
+    return sparse
+
+
+def _sparse_mask(
+    inputs: SPNInputs,
+    sparse: torch.Tensor,
+    current: torch.Tensor,
+) -> torch.Tensor:
+    if inputs.sparse_mask is None:
+        return (sparse > 0.0).to(dtype=torch.float32)
+    mask = _as_nchw(inputs.sparse_mask, "sparse_mask").to(device=current.device)
+    if mask.shape != current.shape:
+        raise ValueError("sparse_mask must have the same shape as current")
+    return (mask > 0.0).to(dtype=torch.float32)
 
 
 def _normalized_coordinate(

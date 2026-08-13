@@ -10,10 +10,14 @@ from spn_accel_cmodel.torch_functional import (
     OffsetMode,
     PaddingMode,
     SPNConfig,
+    SPNInputs,
     SamplingMode,
     SparseFusionMode,
+    UnifiedSPN,
     sample_neighbors,
 )
+
+from official_spn_references import reference_cspn, reference_nlspn
 
 
 class TorchSPNSamplingTest(unittest.TestCase):
@@ -81,6 +85,194 @@ class TorchSPNSamplingTest(unittest.TestCase):
     def test_invalid_dyspn_neighbor_count_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "DySPN supports K in"):
             SPNConfig.dyspn(num_neighbors=4)
+
+
+def _randn(generator, shape, scale=1.0):
+    return torch.randn(shape, generator=generator, dtype=torch.float32) * scale
+
+
+class CSPNGoldenTest(unittest.TestCase):
+    def _case(self, preserve_code_mask):
+        generator = torch.Generator().manual_seed(1207)
+        initial = _randn(generator, (1, 1, 4, 5))
+        guidance = _randn(generator, (1, 8, 4, 5)) + 0.2
+        sparse = torch.zeros_like(initial)
+        sparse[:, :, 1, 2] = 9.0
+
+        expected, expected_trace = reference_cspn(
+            initial,
+            guidance,
+            iterations=3,
+            sparse_depth=sparse if preserve_code_mask else None,
+        )
+        actual, trace = UnifiedSPN(
+            SPNConfig.cspn(
+                iterations=3,
+                preserve_code_mask=preserve_code_mask,
+            )
+        )(
+            SPNInputs(
+                current=initial,
+                affinity=guidance,
+                sparse_depth=sparse if preserve_code_mask else None,
+            ),
+            return_trace=True,
+        )
+
+        torch.testing.assert_close(actual, expected, rtol=1.0e-6, atol=1.0e-6)
+        self.assertEqual(len(trace.outputs), 3)
+        for actual_step, expected_step in zip(
+            trace.outputs,
+            expected_trace,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                actual_step,
+                expected_step,
+                rtol=1.0e-6,
+                atol=1.0e-6,
+            )
+
+    def test_matches_released_cspn_without_sparse_mask(self):
+        self._case(False)
+
+    def test_matches_released_cspn_code_post_mask_behavior(self):
+        self._case(True)
+
+
+class NLSPNGoldenTest(unittest.TestCase):
+    def _inputs(self):
+        generator = torch.Generator().manual_seed(1207)
+        initial = _randn(generator, (1, 1, 5, 6))
+        affinity = _randn(generator, (1, 8, 5, 6), scale=0.4)
+        residual_yx = _randn(generator, (1, 8, 2, 5, 6), scale=0.25)
+        confidence = torch.sigmoid(_randn(generator, (1, 1, 5, 6)))
+        sparse = torch.zeros_like(initial)
+        sparse[:, :, 1, 1] = 2.5
+        sparse[:, :, 3, 4] = 7.0
+        return initial, affinity, residual_yx, confidence, sparse
+
+    def test_all_nlspn_affinity_modes_match_author_formula(self):
+        initial, affinity, residual_yx, confidence, _ = self._inputs()
+        for mode in (
+            NormalizationMode.AS,
+            NormalizationMode.ASS,
+            NormalizationMode.TC,
+            NormalizationMode.TGASS,
+        ):
+            with self.subTest(mode=mode.name):
+                expected, expected_trace, expected_aff, expected_center = reference_nlspn(
+                    initial,
+                    affinity,
+                    residual_yx,
+                    iterations=2,
+                    mode=mode.name,
+                    confidence=confidence,
+                )
+                actual, trace = UnifiedSPN(
+                    SPNConfig.nlspn(iterations=2, normalization=mode)
+                )(
+                    SPNInputs(
+                        current=initial,
+                        affinity=affinity,
+                        offsets=residual_yx,
+                        confidence=confidence,
+                    ),
+                    return_trace=True,
+                )
+                torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+                torch.testing.assert_close(
+                    trace.neighbor_affinities[0], expected_aff, rtol=1.0e-5, atol=1.0e-6
+                )
+                torch.testing.assert_close(
+                    trace.current_affinities[0], expected_center, rtol=1.0e-5, atol=1.0e-6
+                )
+                for actual_step, expected_step in zip(
+                    trace.outputs,
+                    expected_trace,
+                    strict=True,
+                ):
+                    torch.testing.assert_close(
+                        actual_step,
+                        expected_step,
+                        rtol=1.0e-5,
+                        atol=1.0e-6,
+                    )
+
+    def test_hard_pre_sparse_preservation_matches_author_order(self):
+        initial, affinity, residual_yx, confidence, sparse = self._inputs()
+        expected, expected_trace, _, _ = reference_nlspn(
+            initial,
+            affinity,
+            residual_yx,
+            iterations=3,
+            mode="TGASS",
+            confidence=confidence,
+            sparse_depth=sparse,
+            preserve_input=True,
+        )
+        actual, trace = UnifiedSPN(
+            SPNConfig.nlspn(iterations=3, preserve_input=True)
+        )(
+            SPNInputs(
+                current=initial,
+                affinity=affinity,
+                offsets=residual_yx,
+                confidence=confidence,
+                sparse_depth=sparse,
+            ),
+            return_trace=True,
+        )
+        torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+        for actual_step, expected_step in zip(trace.outputs, expected_trace, strict=True):
+            torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
+
+    def test_completionformer_temperature_100_matches_its_fork(self):
+        initial, affinity, residual_yx, confidence, _ = self._inputs()
+        expected, expected_trace, _, _ = reference_nlspn(
+            initial,
+            affinity,
+            residual_yx,
+            iterations=2,
+            mode="TGASS",
+            confidence=confidence,
+            temperature=100.0,
+        )
+        actual, trace = UnifiedSPN(SPNConfig.completionformer(iterations=2))(
+            SPNInputs(
+                current=initial,
+                affinity=affinity,
+                offsets=residual_yx,
+                confidence=confidence,
+            ),
+            return_trace=True,
+        )
+        torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+        for actual_step, expected_step in zip(trace.outputs, expected_trace, strict=True):
+            torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
+
+    def test_legacy_confidence_offsets_include_the_base_stencil(self):
+        initial, affinity, residual_yx, confidence, _ = self._inputs()
+        expected, _, _, _ = reference_nlspn(
+            initial,
+            affinity,
+            residual_yx,
+            iterations=1,
+            mode="TGASS",
+            confidence=confidence,
+            legacy_confidence_offsets=True,
+        )
+        actual = UnifiedSPN(
+            SPNConfig.nlspn(iterations=1, legacy_confidence_offsets=True)
+        )(
+            SPNInputs(
+                current=initial,
+                affinity=affinity,
+                offsets=residual_yx,
+                confidence=confidence,
+            )
+        )
+        torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
 
 
 if __name__ == "__main__":
