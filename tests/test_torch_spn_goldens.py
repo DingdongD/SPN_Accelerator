@@ -64,6 +64,46 @@ class TorchSPNSamplingTest(unittest.TestCase):
         )
         torch.testing.assert_close(actual[0, 0, 0, 0, 0], torch.tensor(1.0))
 
+    def test_singleton_dimensions_preserve_absolute_zero_padding(self):
+        cases = (
+            (
+                torch.tensor([[[[4.0]]]]),
+                torch.tensor([1.0, 0.0]),
+                torch.tensor(0.0),
+            ),
+            (
+                torch.tensor([[[[2.0, 6.0]]]]),
+                torch.tensor([0.0, 0.5]),
+                torch.tensor(1.0),
+            ),
+            (
+                torch.tensor([[[[2.0], [6.0]]]]),
+                torch.tensor([0.5, 0.0]),
+                torch.tensor(1.0),
+            ),
+        )
+        for state, xy, expected in cases:
+            with self.subTest(shape=tuple(state.shape), displacement=xy.tolist()):
+                offsets = torch.zeros(
+                    (1, 1, 2, state.shape[2], state.shape[3]),
+                    dtype=torch.float32,
+                )
+                offsets[0, 0, :, 0, 0] = xy
+                for align_corners in (True, False):
+                    actual = sample_neighbors(
+                        state,
+                        offsets,
+                        SamplingMode.BILINEAR,
+                        PaddingMode.ZEROS,
+                        align_corners=align_corners,
+                    )
+                    torch.testing.assert_close(
+                        actual[0, 0, 0, 0, 0],
+                        expected,
+                        rtol=0.0,
+                        atol=1.0e-6,
+                    )
+
     def test_nlspn_profile_uses_residual_yx_offsets(self):
         cfg = SPNConfig.nlspn(
             iterations=2,
@@ -95,6 +135,20 @@ class TorchSPNSamplingTest(unittest.TestCase):
     def test_invalid_dyspn_neighbor_count_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "DySPN supports K in"):
             SPNConfig.dyspn(num_neighbors=4)
+
+    def test_incompatible_softmax_anchor_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "SOFTMAX requires AnchorMode.NONE"):
+            SPNConfig(
+                iterations=1,
+                num_neighbors=1,
+                neighbor_mode=NeighborMode.OFFSET,
+                sampling_mode=SamplingMode.BILINEAR,
+                padding_mode=PaddingMode.ZEROS,
+                offset_mode=OffsetMode.ABSOLUTE_XY,
+                affinity_mode=AffinityMode.STATIC,
+                normalization=NormalizationMode.SOFTMAX,
+                anchor_mode=AnchorMode.INITIAL,
+            )
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
@@ -131,6 +185,38 @@ class GenericSPNTest(unittest.TestCase):
         expected[:, :, 0, 1] = 9.0
         torch.testing.assert_close(actual, expected, rtol=1.0e-6, atol=1.0e-6)
 
+    def test_generic_tgass_applies_confidence_after_tanh_transform(self):
+        cfg = SPNConfig(
+            iterations=1,
+            num_neighbors=1,
+            neighbor_mode=NeighborMode.OFFSET,
+            sampling_mode=SamplingMode.BILINEAR,
+            padding_mode=PaddingMode.ZEROS,
+            offset_mode=OffsetMode.ABSOLUTE_XY,
+            affinity_mode=AffinityMode.STATIC,
+            normalization=NormalizationMode.TGASS,
+            anchor_mode=AnchorMode.INITIAL,
+            neighbor_confidence=NeighborConfidenceMode.SAMPLE_AT_NEIGHBOR,
+            affinity_gamma=0.5,
+        )
+        current = torch.full((1, 1, 2, 2), 4.0)
+        actual = UnifiedSPN(cfg)(
+            SPNInputs(
+                current=current,
+                initial=torch.zeros_like(current),
+                affinity=torch.full((1, 1, 2, 2), 2.0),
+                offsets=torch.zeros((1, 1, 2, 2, 2)),
+                confidence=torch.full((1, 1, 2, 2), 0.25),
+            )
+        )
+        effective = torch.tanh(torch.tensor(2.0)) / 0.5 * 0.25
+        torch.testing.assert_close(
+            actual,
+            torch.full_like(actual, 4.0 * effective),
+            rtol=1.0e-6,
+            atol=1.0e-6,
+        )
+
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
 class TorchSPNValidationTest(unittest.TestCase):
@@ -156,6 +242,20 @@ class TorchSPNValidationTest(unittest.TestCase):
                 )
             )
 
+    @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "CUDA unavailable")
+    def test_cpu_metadata_is_moved_to_cuda_state_device(self):
+        current = torch.randn((1, 1, 3, 4), device="cuda")
+        output = UnifiedSPN(SPNConfig.nlspn(iterations=1))(
+            SPNInputs(
+                current=current,
+                initial=torch.randn((1, 1, 3, 4)),
+                affinity=torch.randn((1, 8, 3, 4)),
+                offsets=torch.randn((1, 8, 2, 3, 4)) * 0.1,
+                confidence=torch.sigmoid(torch.randn((1, 1, 3, 4))),
+            )
+        )
+        self.assertEqual(output.device.type, "cuda")
+
 
 def _randn(generator, shape, scale=1.0):
     return torch.randn(shape, generator=generator, dtype=torch.float32) * scale
@@ -170,7 +270,7 @@ class CSPNGoldenTest(unittest.TestCase):
         sparse = torch.zeros_like(initial)
         sparse[:, :, 1, 2] = 9.0
 
-        expected, expected_trace = reference_cspn(
+        expected, expected_trace, expected_metadata = reference_cspn(
             initial,
             guidance,
             iterations=3,
@@ -190,7 +290,7 @@ class CSPNGoldenTest(unittest.TestCase):
             return_trace=True,
         )
 
-        torch.testing.assert_close(actual, expected, rtol=1.0e-6, atol=1.0e-6)
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
         self.assertEqual(len(trace.outputs), 3)
         for actual_step, expected_step in zip(
             trace.outputs,
@@ -200,8 +300,30 @@ class CSPNGoldenTest(unittest.TestCase):
             torch.testing.assert_close(
                 actual_step,
                 expected_step,
-                rtol=1.0e-6,
-                atol=1.0e-6,
+                rtol=0.0,
+                atol=0.0,
+            )
+        for candidate, expected_candidate in zip(
+            trace.candidates,
+            expected_metadata["candidates"],
+            strict=True,
+        ):
+            torch.testing.assert_close(candidate, expected_candidate, rtol=0.0, atol=0.0)
+        for offsets in trace.offsets:
+            torch.testing.assert_close(offsets, expected_metadata["offsets"], rtol=0.0, atol=0.0)
+        for affinity in trace.neighbor_affinities:
+            torch.testing.assert_close(
+                affinity,
+                expected_metadata["neighbor_affinity"],
+                rtol=0.0,
+                atol=0.0,
+            )
+        for affinity in trace.initial_affinities:
+            torch.testing.assert_close(
+                affinity,
+                expected_metadata["initial_affinity"],
+                rtol=0.0,
+                atol=0.0,
             )
 
     def test_matches_released_cspn_without_sparse_mask(self):
@@ -246,7 +368,7 @@ class NLSPNGoldenTest(unittest.TestCase):
             NormalizationMode.TGASS,
         ):
             with self.subTest(mode=mode.name):
-                expected, expected_trace, expected_aff, expected_center = reference_nlspn(
+                expected, expected_trace, expected_aff, expected_center, expected_metadata = reference_nlspn(
                     initial,
                     affinity,
                     residual_yx,
@@ -283,10 +405,19 @@ class NLSPNGoldenTest(unittest.TestCase):
                         rtol=1.0e-5,
                         atol=1.0e-6,
                     )
+                for candidate, expected_candidate in zip(
+                    trace.candidates,
+                    expected_metadata["candidates"],
+                    strict=True,
+                ):
+                    torch.testing.assert_close(candidate, expected_candidate, rtol=1.0e-5, atol=1.0e-6)
+                for offsets in trace.offsets:
+                    torch.testing.assert_close(offsets, expected_metadata["offsets"], rtol=0.0, atol=0.0)
+                self.assertTrue(all(value is None for value in trace.initial_affinities))
 
     def test_hard_pre_sparse_preservation_matches_author_order(self):
         initial, affinity, residual_yx, confidence, sparse = self._inputs()
-        expected, expected_trace, _, _ = reference_nlspn(
+        expected, expected_trace, _, _, _ = reference_nlspn(
             initial,
             affinity,
             residual_yx,
@@ -314,7 +445,7 @@ class NLSPNGoldenTest(unittest.TestCase):
 
     def test_completionformer_temperature_100_matches_its_fork(self):
         initial, affinity, residual_yx, confidence, _ = self._inputs()
-        expected, expected_trace, _, _ = reference_nlspn(
+        expected, expected_trace, _, _, _ = reference_nlspn(
             initial,
             affinity,
             residual_yx,
@@ -338,7 +469,7 @@ class NLSPNGoldenTest(unittest.TestCase):
 
     def test_legacy_confidence_offsets_include_the_base_stencil(self):
         initial, affinity, residual_yx, confidence, _ = self._inputs()
-        expected, _, _, _ = reference_nlspn(
+        expected, _, _, _, _ = reference_nlspn(
             initial,
             affinity,
             residual_yx,
@@ -425,7 +556,7 @@ class DySPNGoldenTest(unittest.TestCase):
         sparse[:, :, 0, 0] = 3.0
         sparse[:, :, 2, 4] = 8.0
         confidence_logits = _randn(generator, (1, 1, 4, 6))
-        expected, expected_trace, expected_affinities = reference_dyspn(
+        expected, expected_trace, expected_affinities, expected_metadata = reference_dyspn(
             initial,
             residual_yx,
             logits,
@@ -453,12 +584,55 @@ class DySPNGoldenTest(unittest.TestCase):
             strict=True,
         ):
             torch.testing.assert_close(actual_aff, expected_aff, rtol=1.0e-6, atol=1.0e-7)
+        for candidate, expected_candidate in zip(
+            trace.candidates,
+            expected_metadata["candidates"],
+            strict=True,
+        ):
+            torch.testing.assert_close(candidate, expected_candidate, rtol=1.0e-5, atol=1.0e-6)
+        for offsets, expected_offsets in zip(
+            trace.offsets,
+            expected_metadata["offsets"],
+            strict=True,
+        ):
+            torch.testing.assert_close(offsets, expected_offsets, rtol=0.0, atol=0.0)
+        self.assertTrue(all(value is None for value in trace.current_affinities))
+        self.assertTrue(all(value is None for value in trace.initial_affinities))
 
     def test_k5_matches_current_default_author_module(self):
         self._case(5)
 
     def test_k9_matches_current_author_module(self):
         self._case(9)
+
+    def test_k9_uses_author_sequential_fp32_accumulation_order(self):
+        values = torch.tensor(
+            [8.0, 1.0e7, -1.0e8, -1.0e7, 1.0e8, 4.0, 1.0e7, -2.0, -2.0],
+            dtype=torch.float32,
+        ).view(1, 1, 3, 3)
+        logits = torch.zeros((1, 1, 9, 3, 3))
+        offsets = torch.zeros((1, 1, 9, 2, 3, 3))
+        inputs = SPNInputs(
+            current=values,
+            affinity=logits,
+            offsets=offsets,
+            confidence=torch.zeros_like(values),
+            sparse_depth=torch.zeros_like(values),
+        )
+        actual = UnifiedSPN(SPNConfig.dyspn(iterations=1, num_neighbors=9))(inputs)
+        expected, _, _, _ = reference_dyspn(
+            values,
+            offsets,
+            logits,
+            torch.zeros_like(values),
+            torch.zeros_like(values),
+        )
+        torch.testing.assert_close(
+            actual[0, 0, 1, 1],
+            expected[0, 0, 1, 1],
+            rtol=0.0,
+            atol=0.0,
+        )
 
     def test_each_iteration_uses_its_own_metadata(self):
         generator = torch.Generator().manual_seed(771)
@@ -508,7 +682,7 @@ class DySPNNLPMGoldenTest(unittest.TestCase):
         sparse = torch.zeros_like(initial)
         sparse[:, :, 1, 2] = 5.0
         confidence = torch.sigmoid(_randn(generator, (1, 1, 7, 8)))
-        expected, expected_candidates, expected_outputs = reference_dyspn_nlpm(
+        expected, expected_candidates, expected_outputs, expected_metadata = reference_dyspn_nlpm(
             initial,
             guidance,
             attention,
@@ -534,6 +708,17 @@ class DySPNNLPMGoldenTest(unittest.TestCase):
             torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
         for actual_step, expected_step in zip(trace.outputs, expected_outputs, strict=True):
             torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
+        for field in (
+            "neighbor_affinities",
+            "current_affinities",
+            "initial_affinities",
+        ):
+            for actual_value, expected_value in zip(
+                getattr(trace, field),
+                expected_metadata[field],
+                strict=True,
+            ):
+                torch.testing.assert_close(actual_value, expected_value, rtol=1.0e-5, atol=1.0e-6)
 
 
 if __name__ == "__main__":

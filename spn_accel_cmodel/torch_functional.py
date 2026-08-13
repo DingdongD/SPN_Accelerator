@@ -153,6 +153,21 @@ class SPNConfig:
             raise ValueError("affinity_gamma must be positive")
         if self.base_offsets_xy and len(self.base_offsets_xy) != self.num_neighbors:
             raise ValueError("base_offsets_xy length must equal num_neighbors")
+        if (
+            self.normalization is NormalizationMode.SOFTMAX
+            and self.anchor_mode is not AnchorMode.NONE
+        ):
+            raise ValueError("SOFTMAX requires AnchorMode.NONE")
+        if (
+            self.normalization is NormalizationMode.DYSPN_NLPM
+            and self.profile is not SPNProfile.DYSPN_NLPM
+        ):
+            raise ValueError("DYSPN_NLPM normalization requires the named NLPM profile")
+        if (
+            self.anchor_mode is AnchorMode.INITIAL_CURRENT
+            and self.profile is not SPNProfile.DYSPN_NLPM
+        ):
+            raise ValueError("INITIAL_CURRENT requires the named NLPM profile")
 
     @classmethod
     def cspn(
@@ -331,7 +346,7 @@ class UnifiedSPN(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, SPNTrace]:
         current = _as_nchw(inputs.current, "current")
         initial = (
-            _as_nchw(inputs.initial, "initial")
+            _as_nchw(inputs.initial, "initial").to(device=current.device)
             if inputs.initial is not None
             else current
         )
@@ -418,7 +433,9 @@ class UnifiedSPN(nn.Module):
         if cfg.neighbor_confidence is NeighborConfidenceMode.SAMPLE_AT_NEIGHBOR:
             if inputs.confidence is None:
                 raise ValueError("neighbor confidence sampling requires confidence")
-            confidence = _as_nchw(inputs.confidence, "confidence")
+            confidence = _as_nchw(inputs.confidence, "confidence").to(
+                device=current.device
+            )
             if (
                 confidence.shape[1] != 1
                 or confidence.shape[0] != current.shape[0]
@@ -538,8 +555,9 @@ class UnifiedSPN(nn.Module):
                     cfg.padding_mode,
                     align_corners=cfg.align_corners,
                 )[:, :, 0]
-                affinity = _normalize_generic_affinity(
-                    raw_affinity * sampled_confidence,
+                affinity = _normalize_effective_affinity(
+                    _pretransform_affinity(raw_affinity, cfg)
+                    * sampled_confidence,
                     cfg,
                 )
 
@@ -634,7 +652,12 @@ class UnifiedSPN(nn.Module):
                 cfg.padding_mode,
                 align_corners=cfg.align_corners,
             )
-            candidate = torch.sum(samples * affinity[:, :, None], dim=1)
+            candidate = torch.zeros_like(state)
+            for neighbor in range(cfg.num_neighbors):
+                candidate = (
+                    candidate
+                    + samples[:, neighbor] * affinity[:, neighbor : neighbor + 1]
+                )
             state = (1.0 - confidence) * candidate + confidence * sparse
             trace.candidates.append(candidate)
             trace.outputs.append(state)
@@ -835,6 +858,16 @@ def _normalize_generic_affinity(
     raw_affinity: torch.Tensor,
     cfg: SPNConfig,
 ) -> torch.Tensor:
+    return _normalize_effective_affinity(
+        _pretransform_affinity(raw_affinity, cfg),
+        cfg,
+    )
+
+
+def _pretransform_affinity(
+    raw_affinity: torch.Tensor,
+    cfg: SPNConfig,
+) -> torch.Tensor:
     affinity = raw_affinity
     if cfg.normalization in {NormalizationMode.TC, NormalizationMode.TGASS}:
         scale = (
@@ -843,6 +876,13 @@ def _normalize_generic_affinity(
             else cfg.affinity_gamma * float(cfg.num_neighbors) + 1.0e-8
         )
         affinity = torch.tanh(affinity / cfg.tanh_temperature) / scale
+    return affinity
+
+
+def _normalize_effective_affinity(
+    affinity: torch.Tensor,
+    cfg: SPNConfig,
+) -> torch.Tensor:
     if cfg.normalization is NormalizationMode.SOFTMAX:
         return torch.softmax(affinity, dim=1)
     if cfg.normalization is NormalizationMode.TC:
@@ -979,7 +1019,7 @@ def _normalized_coordinate(
     size: int,
     align_corners: bool,
 ) -> torch.Tensor:
-    if size <= 1:
+    if size <= 1 and align_corners:
         return torch.zeros_like(coordinate)
     if align_corners:
         return 2.0 * coordinate / float(size - 1) - 1.0
@@ -1025,8 +1065,14 @@ def sample_neighbors(
     )
     sample_x = xx.view(1, 1, h, w) + offsets_xy[:, :, 0]
     sample_y = yy.view(1, 1, h, w) + offsets_xy[:, :, 1]
-    grid_x = _normalized_coordinate(sample_x, w, align_corners)
-    grid_y = _normalized_coordinate(sample_y, h, align_corners)
+    # ``align_corners=True`` cannot encode displacement along a singleton
+    # dimension: every normalized coordinate unnormalizes to pixel zero.  Use
+    # the align-corners-false coordinate system for the whole grid whenever a
+    # spatial dimension is singleton.  Both systems represent the same
+    # absolute pixel coordinates for non-singleton dimensions.
+    grid_align_corners = align_corners and h > 1 and w > 1
+    grid_x = _normalized_coordinate(sample_x, w, grid_align_corners)
+    grid_y = _normalized_coordinate(sample_y, h, grid_align_corners)
     grid = torch.stack((grid_x, grid_y), dim=-1).reshape(b * k, h, w, 2)
     source = state[:, None].expand(b, k, c, h, w).reshape(b * k, c, h, w)
 
@@ -1037,7 +1083,7 @@ def sample_neighbors(
         grid,
         mode=mode,
         padding_mode=torch_padding,
-        align_corners=align_corners,
+        align_corners=grid_align_corners,
     )
     return sampled.reshape(b, k, c, h, w)
 

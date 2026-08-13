@@ -98,21 +98,32 @@ def reference_cspn(
     guidance: torch.Tensor,
     iterations: int,
     sparse_depth: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, list[torch.Tensor]]:
+) -> tuple[torch.Tensor, list[torch.Tensor], dict[str, object]]:
     gate = _cspn_shifted_channels(guidance)
     gate = gate / torch.sum(torch.abs(gate), dim=1, keepdim=True)
     gate_sum = torch.sum(gate, dim=1)[:, :, 1:-1, 1:-1]
     state = initial
     outputs = []
+    candidates = []
     mask = sparse_depth.sign() if sparse_depth is not None else None
     for _ in range(iterations):
         shifted_state = _cspn_shifted_channels(state)
         neighbor = torch.sum(gate * shifted_state, dim=1)[:, :, 1:-1, 1:-1]
         state = neighbor + (1.0 - gate_sum) * initial
+        candidates.append(state)
         if mask is not None:
             state = (1.0 - mask) * state + mask * initial
         outputs.append(state)
-    return state, outputs
+    batch, _, height, width = initial.shape
+    offsets = torch.tensor(GRID8_XY, device=initial.device).view(1, 8, 2, 1, 1)
+    offsets = offsets.expand(batch, 8, 2, height, width)
+    metadata = {
+        "candidates": candidates,
+        "offsets": offsets,
+        "neighbor_affinity": gate[:, :, 0, 1:-1, 1:-1],
+        "initial_affinity": 1.0 - gate_sum,
+    }
+    return state, outputs, metadata
 
 
 def reference_nlspn(
@@ -128,7 +139,7 @@ def reference_nlspn(
     temperature: float = 1.0,
     gamma: float = 0.5,
     legacy_confidence_offsets: bool = False,
-) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor, torch.Tensor, dict[str, object]]:
     b, _, h, w = initial.shape
     base = torch.tensor(GRID8_XY, dtype=torch.float32, device=initial.device)
     base = base.view(1, 8, 2, 1, 1).expand(b, -1, -1, h, w)
@@ -169,7 +180,7 @@ def reference_nlspn(
         samples = _sample_absolute_xy(state, total_xy, align_corners=True)
         state = torch.sum(samples * affinity[:, :, None], dim=1) + center * state
         outputs.append(state)
-    return state, outputs, affinity, center
+    return state, outputs, affinity, center, {"offsets": total_xy, "candidates": outputs}
 
 
 def reference_dyspn(
@@ -178,7 +189,7 @@ def reference_dyspn(
     logits: torch.Tensor,
     sparse_depth: torch.Tensor,
     confidence_logits: torch.Tensor,
-) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor], dict[str, object]]:
     b, iterations, neighbors, _, h, w = residual_yx.shape
     base = torch.tensor(
         DYSPN_BASE_XY[neighbors],
@@ -192,6 +203,7 @@ def reference_dyspn(
 
     state = initial
     outputs = []
+    candidates = []
     effective_affinities = []
     for iteration in range(iterations):
         samples = _sample_absolute_xy(
@@ -199,14 +211,21 @@ def reference_dyspn(
             total_xy[:, iteration],
             align_corners=False,
         )
-        candidate = torch.sum(
-            samples * affinities[:, iteration, :, None],
-            dim=1,
-        )
+        candidate = torch.zeros_like(state)
+        for neighbor in range(neighbors):
+            candidate = (
+                candidate
+                + samples[:, neighbor]
+                * affinities[:, iteration, neighbor : neighbor + 1]
+            )
         state = (1.0 - confidence) * candidate + confidence * sparse_depth
+        candidates.append(candidate)
         outputs.append(state)
         effective_affinities.append(affinities[:, iteration])
-    return state, outputs, effective_affinities
+    return state, outputs, effective_affinities, {
+        "candidates": candidates,
+        "offsets": [total_xy[:, iteration] for iteration in range(iterations)],
+    }
 
 
 def _edge_weight(kernel: int, device: torch.device) -> torch.Tensor:
@@ -240,7 +259,7 @@ def reference_dyspn_nlpm(
     attention_logits: torch.Tensor,
     sparse_depth: torch.Tensor,
     confidence: torch.Tensor,
-) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor], dict[str, object]]:
     iterations = attention_logits.shape[1]
     batch, _, height, width = initial.shape
     abs_sums = torch.cat(
@@ -267,6 +286,9 @@ def reference_dyspn_nlpm(
     state = initial
     candidates = []
     outputs = []
+    neighbor_affinities = []
+    current_affinities = []
+    initial_affinities = []
     for iteration in range(iterations):
         attn = attention[:, iteration]
         denominator = torch.sum(attn * abs_sums, dim=1, keepdim=True) + 1.0e-4
@@ -283,10 +305,17 @@ def reference_dyspn_nlpm(
             keepdim=True,
         )
         candidate = (neighbor + initial_weight * initial) / denominator
+        neighbor_affinities.append(attn[:, 0:3] / denominator)
+        current_affinities.append(attn[:, 3:4] / denominator)
+        initial_affinities.append(initial_weight / denominator)
         candidates.append(candidate)
         state = (
             (1.0 - sparse_confidence) * candidate
             + sparse_confidence * sparse_depth
         )
         outputs.append(state)
-    return state, candidates, outputs
+    return state, candidates, outputs, {
+        "neighbor_affinities": neighbor_affinities,
+        "current_affinities": current_affinities,
+        "initial_affinities": initial_affinities,
+    }
