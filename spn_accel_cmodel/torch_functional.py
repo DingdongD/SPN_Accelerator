@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .torch_spn_types import CanonicalSPNPlan, ReductionMode
+
 
 class NeighborMode(Enum):
     GRID = auto()
