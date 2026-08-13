@@ -25,7 +25,9 @@ Official/profile-specific tensors
 
 `propagate_canonical()` remains the only function that advances the evolving
 depth state. Prediction backbones, pretrained checkpoint distribution, DCNv2,
-FPGA physical layout, and quantization remain outside this change.
+non-FP32 execution, and any system-level accelerator modeling remain outside
+this change. AuthorAdapter v1 is solely a PyTorch reference for the unified SPN
+propagation operator.
 
 ## Upstream Baseline
 
@@ -303,9 +305,8 @@ The existing dense FP32 plan remains unchanged:
 | `group_scale` | `[B,S,G,Ca,H,W]` |
 
 `S` is one for frame-static metadata and `T` for per-iteration metadata.
-Dense constant offsets are acceptable in this FP32 reference. A future FPGA
-IR may represent them using constant-grid descriptors, but that storage change
-must not alter the author or canonical numerical contracts.
+Constant offsets are materialized as dense tensors because this contract is a
+PyTorch numerical reference, not a physical storage or execution description.
 
 ## Validation and Errors
 
