@@ -210,6 +210,19 @@ class CSPNGoldenTest(unittest.TestCase):
     def test_matches_released_cspn_code_post_mask_behavior(self):
         self._case(True)
 
+    def test_shifted_source_channel_mapping_has_hand_computed_interior_value(self):
+        initial = torch.arange(25, dtype=torch.float32).view(1, 1, 5, 5)
+        guidance = torch.arange(1, 9, dtype=torch.float32).view(1, 8, 1, 1)
+        guidance = guidance.expand(1, 8, 5, 5)
+        actual = UnifiedSPN(SPNConfig.cspn(iterations=1))(
+            SPNInputs(initial, guidance)
+        )
+        source_values = torch.tensor(
+            [18.0, 17.0, 16.0, 13.0, 11.0, 8.0, 7.0, 6.0]
+        )
+        expected = torch.sum(torch.arange(1, 9) * source_values) / 36.0
+        torch.testing.assert_close(actual[0, 0, 2, 2], expected, rtol=0.0, atol=1.0e-6)
+
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
 class NLSPNGoldenTest(unittest.TestCase):
@@ -372,6 +385,33 @@ class NLSPNGoldenTest(unittest.TestCase):
         flattened18 = model(SPNInputs(initial, affinity, offsets=with_center))
         torch.testing.assert_close(flattened16, canonical)
         torch.testing.assert_close(flattened18, canonical)
+
+    def test_residual_yx_order_and_base_grid_have_hand_computed_value(self):
+        initial = torch.tensor(
+            [[[[0.0, 1.0, 2.0, 3.0],
+               [10.0, 11.0, 12.0, 13.0],
+               [20.0, 21.0, 22.0, 23.0]]]]
+        )
+        affinity = torch.zeros((1, 8, 3, 4))
+        affinity[:, 3] = 1.0  # base displacement (dx=-1, dy=0)
+        residual_yx = torch.zeros((1, 8, 2, 3, 4))
+        residual_yx[:, 3, 0] = 0.25  # dy
+        residual_yx[:, 3, 1] = 0.50  # dx
+        actual = UnifiedSPN(
+            SPNConfig.nlspn(
+                iterations=1,
+                confidence=False,
+                normalization=NormalizationMode.AS,
+            )
+        )(SPNInputs(initial, affinity, offsets=residual_yx))
+        neighbor_weight = 1.0 / 1.0001
+        expected = neighbor_weight * 14.0 + (1.0 - neighbor_weight) * 12.0
+        torch.testing.assert_close(
+            actual[0, 0, 1, 2],
+            torch.tensor(expected),
+            rtol=0.0,
+            atol=2.0e-6,
+        )
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
