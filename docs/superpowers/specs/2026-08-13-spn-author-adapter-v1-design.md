@@ -376,6 +376,9 @@ This is an intentional breaking API change:
 
 - public `SPNInputs` is removed;
 - callers must use the profile-specific RawInputs type;
+- the non-author `GENERIC` profile and `compile_generic_plan()` facade are
+  removed; custom propagation uses `CanonicalSPNPlan` and
+  `propagate_canonical()` directly;
 - existing low-level tests and callers that already possess decoded offsets or
   affinity migrate to internal decoded/compiler tests or construct a
   `CanonicalSPNPlan` and call `propagate_canonical()` directly;
