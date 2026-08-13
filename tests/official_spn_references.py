@@ -39,6 +39,72 @@ DYSPN_BASE_XY = {
 }
 
 
+def reference_nlspn_author_decode(
+    guidance: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    batch, neighbors, height, width = guidance.shape
+    conv_output = F.conv2d(guidance, weight, bias, padding=1)
+    o1, o2, affinity = torch.chunk(conv_output, 3, dim=1)
+    offsets = torch.cat((o1, o2), dim=1).view(
+        batch,
+        neighbors,
+        2,
+        height,
+        width,
+    )
+    return {
+        "conv_output": conv_output,
+        "residual_offsets_yx": offsets,
+        "raw_affinity": affinity,
+    }
+
+
+def reference_completionformer_author_decode(
+    guidance: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    return reference_nlspn_author_decode(guidance, weight, bias)
+
+
+def reference_dyspn_author_decode(
+    guide: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    *,
+    iterations: int,
+    num_neighbors: int,
+) -> dict[str, torch.Tensor]:
+    batch, _, height, width = guide.shape
+    channels = iterations * num_neighbors
+    conv_output = F.conv2d(guide, weight, bias, padding=1)
+    offset_flat, affinity_flat = torch.split(
+        conv_output,
+        [2 * channels, channels],
+        dim=1,
+    )
+    return {
+        "conv_output": conv_output,
+        "residual_offsets_yx": offset_flat.view(
+            batch,
+            iterations,
+            num_neighbors,
+            2,
+            height,
+            width,
+        ),
+        "raw_affinity": affinity_flat.view(
+            batch,
+            iterations,
+            num_neighbors,
+            height,
+            width,
+        ),
+    }
+
+
 def _sample_absolute_xy(
     state: torch.Tensor,
     offsets_xy: torch.Tensor,

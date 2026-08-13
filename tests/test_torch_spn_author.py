@@ -27,6 +27,11 @@ if torch is not None:
         SPNConfig,
         SPNProfile,
     )
+    from official_spn_references import (
+        reference_completionformer_author_decode,
+        reference_dyspn_author_decode,
+        reference_nlspn_author_decode,
+    )
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
@@ -371,6 +376,109 @@ class AuthorInputValidationTest(unittest.TestCase):
                     image,
                 )
             )
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class IndependentAuthorDecodeTest(unittest.TestCase):
+    def test_nlspn_family_matches_independent_conv_formula(self):
+        generator = torch.Generator().manual_seed(8401)
+        cases = (
+            (
+                NLSPNAuthor,
+                SPNConfig.nlspn(iterations=2),
+                NLSPNRawInputs,
+                reference_nlspn_author_decode,
+            ),
+            (
+                CompletionFormerAuthor,
+                SPNConfig.completionformer(iterations=2),
+                CompletionFormerRawInputs,
+                reference_completionformer_author_decode,
+            ),
+        )
+        for author_type, config, input_type, reference in cases:
+            with self.subTest(profile=config.profile.name):
+                author = author_type(config)
+                with torch.no_grad():
+                    author.conv_offset_aff.weight.copy_(
+                        torch.randn(
+                            author.conv_offset_aff.weight.shape,
+                            generator=generator,
+                        )
+                    )
+                    author.conv_offset_aff.bias.copy_(
+                        torch.randn(
+                            author.conv_offset_aff.bias.shape,
+                            generator=generator,
+                        )
+                    )
+                initial = torch.randn((1, 1, 3, 4), generator=generator)
+                guidance = torch.randn((1, 8, 3, 4), generator=generator)
+                confidence = torch.sigmoid(
+                    torch.randn(initial.shape, generator=generator)
+                )
+                sparse = torch.zeros_like(initial)
+                if input_type is NLSPNRawInputs:
+                    inputs = input_type(
+                        initial,
+                        guidance,
+                        confidence_probability=confidence,
+                        feat_fix=sparse,
+                    )
+                else:
+                    inputs = input_type(initial, guidance, confidence, sparse)
+                decoded = author.decode(inputs)
+                expected = reference(
+                    guidance,
+                    author.conv_offset_aff.weight,
+                    author.conv_offset_aff.bias,
+                )
+                torch.testing.assert_close(
+                    decoded.residual_offsets_yx,
+                    expected["residual_offsets_yx"],
+                )
+                torch.testing.assert_close(
+                    decoded.raw_affinity,
+                    expected["raw_affinity"],
+                )
+
+    def test_dyspn_matches_independent_conv_formula(self):
+        generator = torch.Generator().manual_seed(8402)
+        config = SPNConfig.dyspn(iterations=2, num_neighbors=5)
+        author = DySPNAuthor(config)
+        with torch.no_grad():
+            author.conv_offset_aff.weight.copy_(
+                torch.randn(
+                    author.conv_offset_aff.weight.shape,
+                    generator=generator,
+                )
+            )
+            author.conv_offset_aff.bias.copy_(
+                torch.randn(
+                    author.conv_offset_aff.bias.shape,
+                    generator=generator,
+                )
+            )
+        initial = torch.randn((1, 1, 3, 4), generator=generator)
+        guide = torch.randn((1, 10, 3, 4), generator=generator)
+        decoded = author.decode(
+            DySPNRawInputs(initial, guide, torch.zeros_like(initial), initial)
+        )
+        expected = reference_dyspn_author_decode(
+            guide,
+            author.conv_offset_aff.weight,
+            author.conv_offset_aff.bias,
+            iterations=2,
+            num_neighbors=5,
+        )
+        torch.testing.assert_close(
+            decoded.residual_offsets_yx,
+            expected["residual_offsets_yx"],
+        )
+        torch.testing.assert_close(
+            decoded.raw_affinity,
+            expected["raw_affinity"],
+        )
 
 
 if __name__ == "__main__":
