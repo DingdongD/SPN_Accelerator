@@ -10,16 +10,22 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
+from .torch_spn_author import (
+    AUTHOR_BUILDERS,
+    CSPNAuthor,
+    CompletionFormerAuthor,
+    DySPNNLPMAuthor,
+    DySPNAuthor,
+    NLSPNAuthor,
+)
 from .torch_spn_adapters import (
     compile_completionformer_plan,
     compile_cspn_plan,
     compile_dyspn_nlpm_plan,
     compile_dyspn_plan,
-    compile_generic_plan,
     compile_nlspn_plan,
 )
 from .torch_spn_core import (
-    as_nchw,
     propagate_canonical,
     sample_neighbors,
     validate_plan,
@@ -29,14 +35,18 @@ from .torch_spn_types import (
     AffinityMode,
     AnchorMode,
     CanonicalSPNPlan,
+    CSPNRawInputs,
+    CompletionFormerRawInputs,
+    DySPNNLPMRawInputs,
+    DySPNRawInputs,
     NeighborConfidenceMode,
     NeighborMode,
     NormalizationMode,
     OffsetMode,
     PaddingMode,
     ReductionMode,
+    NLSPNRawInputs,
     SPNConfig,
-    SPNInputs,
     SPNProfile,
     SPNTrace,
     SamplingMode,
@@ -50,8 +60,15 @@ _PLAN_COMPILERS = {
     SPNProfile.COMPLETIONFORMER: compile_completionformer_plan,
     SPNProfile.DYSPN: compile_dyspn_plan,
     SPNProfile.DYSPN_NLPM: compile_dyspn_nlpm_plan,
-    SPNProfile.GENERIC: compile_generic_plan,
 }
+
+AuthorInputs = (
+    CSPNRawInputs
+    | NLSPNRawInputs
+    | CompletionFormerRawInputs
+    | DySPNRawInputs
+    | DySPNNLPMRawInputs
+)
 
 
 class UnifiedSPN(nn.Module):
@@ -60,50 +77,56 @@ class UnifiedSPN(nn.Module):
     def __init__(self, config: SPNConfig):
         super().__init__()
         self.config = config
+        self.author = AUTHOR_BUILDERS[config.profile](config)
 
     def forward(
         self,
-        inputs: SPNInputs,
+        inputs: AuthorInputs,
         *,
         return_trace: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, SPNTrace]:
-        current = as_nchw(inputs.current, "current")
-        initial = (
-            current
-            if inputs.initial is None
-            else as_nchw(inputs.initial, "initial", device=current.device)
-        )
-        if initial.shape != current.shape:
-            raise ValueError("initial and current must have identical shapes")
+        decoded = self.author.decode(inputs)
         compiler = _PLAN_COMPILERS[self.config.profile]
-        plan = compiler(self.config, inputs, current, initial)
-        return propagate_canonical(current, initial, plan, return_trace)
+        plan = compiler(self.config, decoded)
+        return propagate_canonical(
+            decoded.current,
+            decoded.initial,
+            plan,
+            return_trace,
+        )
 
 
 __all__ = [
     "AffinityLayout",
     "AffinityMode",
     "AnchorMode",
+    "CSPNRawInputs",
+    "CSPNAuthor",
     "CanonicalSPNPlan",
+    "CompletionFormerRawInputs",
+    "CompletionFormerAuthor",
+    "DySPNNLPMRawInputs",
+    "DySPNNLPMAuthor",
+    "DySPNRawInputs",
+    "DySPNAuthor",
     "NeighborConfidenceMode",
     "NeighborMode",
     "NormalizationMode",
+    "NLSPNRawInputs",
+    "NLSPNAuthor",
     "OffsetMode",
     "PaddingMode",
     "ReductionMode",
     "SPNConfig",
-    "SPNInputs",
     "SPNProfile",
     "SPNTrace",
     "SamplingMode",
     "SparseFusionMode",
     "UnifiedSPN",
-    "as_nchw",
     "compile_completionformer_plan",
     "compile_cspn_plan",
     "compile_dyspn_nlpm_plan",
     "compile_dyspn_plan",
-    "compile_generic_plan",
     "compile_nlspn_plan",
     "propagate_canonical",
     "sample_neighbors",

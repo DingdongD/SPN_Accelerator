@@ -5,20 +5,16 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
+from .torch_spn_decoded import DecodedSPNParameters
 from .torch_spn_core import as_nchw, sample_neighbors
 from .torch_spn_types import (
-    AffinityLayout,
-    AffinityMode,
-    AnchorMode,
     CanonicalSPNPlan,
     GRID8_XY,
     NeighborConfidenceMode,
-    NeighborMode,
     NormalizationMode,
     OffsetMode,
     ReductionMode,
     SPNConfig,
-    SPNInputs,
     SparseFusionMode,
 )
 
@@ -134,11 +130,11 @@ def _shift_cspn_source_channels(value: torch.Tensor) -> torch.Tensor:
 
 def compile_cspn_plan(
     config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-    initial: torch.Tensor,
+    decoded: DecodedSPNParameters,
 ) -> CanonicalSPNPlan:
-    guidance = _neighbor_map(inputs.affinity, current, 8, "affinity")
+    current = decoded.current
+    initial = decoded.initial
+    guidance = _neighbor_map(decoded.raw_affinity, current, 8, "raw_affinity")
     shifted = _shift_cspn_source_channels(guidance)
     normalized = shifted / torch.sum(torch.abs(shifted), dim=1, keepdim=True)
     neighbor = normalized[:, :, :, 1:-1, 1:-1].unsqueeze(1)
@@ -150,10 +146,10 @@ def compile_cspn_plan(
     post_gate = None
     post_value = None
     if config.sparse_fusion is SparseFusionMode.CSPN_CODE_POST:
-        if inputs.sparse_depth is None:
+        if decoded.sparse_depth is None:
             raise ValueError("CSPN code post-mask requires sparse_depth")
         sparse = as_nchw(
-            inputs.sparse_depth,
+            decoded.sparse_depth,
             "sparse_depth",
             device=current.device,
         )
@@ -177,27 +173,15 @@ def compile_cspn_plan(
 
 def _static_offsets(
     config: SPNConfig,
-    inputs: SPNInputs,
+    decoded: DecodedSPNParameters,
     current: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if inputs.offsets is None:
+    if decoded.residual_offsets_yx is None:
         raise ValueError("offset propagation requires offsets")
-    offsets = inputs.offsets.to(device=current.device, dtype=torch.float32)
-    if offsets.ndim == 4 and offsets.shape[1] in {
-        2 * config.num_neighbors,
-        2 * (config.num_neighbors + 1),
-    }:
-        points = offsets.shape[1] // 2
-        offsets = offsets.reshape(
-            offsets.shape[0],
-            points,
-            2,
-            offsets.shape[2],
-            offsets.shape[3],
-        )
-        if points == config.num_neighbors + 1:
-            center = config.num_neighbors // 2
-            offsets = torch.cat((offsets[:, :center], offsets[:, center + 1 :]), dim=1)
+    offsets = decoded.residual_offsets_yx.to(
+        device=current.device,
+        dtype=torch.float32,
+    )
     expected = (
         current.shape[0],
         config.num_neighbors,
@@ -216,18 +200,22 @@ def _static_offsets(
 
 
 def _sparse_and_mask(
-    inputs: SPNInputs,
+    decoded: DecodedSPNParameters,
     current: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if inputs.sparse_depth is None:
+    if decoded.sparse_depth is None:
         raise ValueError("configured sparse fusion requires sparse_depth")
-    sparse = as_nchw(inputs.sparse_depth, "sparse_depth", device=current.device)
+    sparse = as_nchw(decoded.sparse_depth, "sparse_depth", device=current.device)
     if sparse.shape != current.shape:
         raise ValueError("sparse_depth must have the same shape as current")
-    if inputs.sparse_mask is None:
+    if decoded.sparse_mask is None:
         mask = (sparse > 0.0).to(dtype=torch.float32)
     else:
-        raw_mask = as_nchw(inputs.sparse_mask, "sparse_mask", device=current.device)
+        raw_mask = as_nchw(
+            decoded.sparse_mask,
+            "sparse_mask",
+            device=current.device,
+        )
         if raw_mask.shape != current.shape:
             raise ValueError("sparse_mask must have the same shape as current")
         mask = (raw_mask > 0.0).to(dtype=torch.float32)
@@ -236,26 +224,34 @@ def _sparse_and_mask(
 
 def _compile_nlspn_like_plan(
     config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-    initial: torch.Tensor,
-    *,
-    temperature: float,
+    decoded: DecodedSPNParameters,
 ) -> CanonicalSPNPlan:
-    del initial
-    affinity = _neighbor_map(inputs.affinity, current, config.num_neighbors, "affinity")
-    residual_xy, total_xy = _static_offsets(config, inputs, current)
+    current = decoded.current
+    affinity = _neighbor_map(
+        decoded.raw_affinity,
+        current,
+        config.num_neighbors,
+        "raw_affinity",
+    )
+    residual_xy, total_xy = _static_offsets(config, decoded, current)
     if config.normalization in {NormalizationMode.TC, NormalizationMode.TGASS}:
-        scale = (
-            float(config.num_neighbors)
-            if config.normalization is NormalizationMode.TC
-            else config.affinity_gamma * float(config.num_neighbors) + 1.0e-8
+        if decoded.affinity_scale is None:
+            raise ValueError("TC/TGASS requires decoded affinity_scale")
+        scale = decoded.affinity_scale.to(
+            device=current.device,
+            dtype=torch.float32,
         )
-        affinity = torch.tanh(affinity / temperature) / scale
+        if config.normalization is NormalizationMode.TGASS:
+            scale = scale + 1.0e-8
+        affinity = torch.tanh(affinity / config.tanh_temperature) / scale
     if config.neighbor_confidence is NeighborConfidenceMode.SAMPLE_AT_NEIGHBOR:
-        if inputs.confidence is None:
+        if decoded.confidence_probability is None:
             raise ValueError("neighbor confidence sampling requires confidence")
-        confidence = as_nchw(inputs.confidence, "confidence", device=current.device)
+        confidence = as_nchw(
+            decoded.confidence_probability,
+            "confidence_probability",
+            device=current.device,
+        )
         if confidence.shape != (current.shape[0], 1, current.shape[2], current.shape[3]):
             raise ValueError("confidence must have shape [B,1,H,W]")
         confidence_offsets = total_xy if config.legacy_confidence_offsets else residual_xy
@@ -285,7 +281,7 @@ def _compile_nlspn_like_plan(
     pre_gate = None
     pre_value = None
     if config.sparse_fusion is SparseFusionMode.HARD_PRE:
-        sparse, mask = _sparse_and_mask(inputs, current)
+        sparse, mask = _sparse_and_mask(decoded, current)
         pre_gate = mask.unsqueeze(1)
         pre_value = sparse.unsqueeze(1)
     return _make_plan(
@@ -303,42 +299,24 @@ def _compile_nlspn_like_plan(
 
 def compile_nlspn_plan(
     config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-    initial: torch.Tensor,
+    decoded: DecodedSPNParameters,
 ) -> CanonicalSPNPlan:
-    return _compile_nlspn_like_plan(
-        config,
-        inputs,
-        current,
-        initial,
-        temperature=1.0,
-    )
+    return _compile_nlspn_like_plan(config, decoded)
 
 
 def compile_completionformer_plan(
     config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-    initial: torch.Tensor,
+    decoded: DecodedSPNParameters,
 ) -> CanonicalSPNPlan:
-    return _compile_nlspn_like_plan(
-        config,
-        inputs,
-        current,
-        initial,
-        temperature=100.0,
-    )
+    return _compile_nlspn_like_plan(config, decoded)
 
 
 def compile_dyspn_plan(
     config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-    initial: torch.Tensor,
+    decoded: DecodedSPNParameters,
 ) -> CanonicalSPNPlan:
-    del initial
-    logits = inputs.affinity.to(device=current.device, dtype=torch.float32)
+    current = decoded.current
+    logits = decoded.raw_affinity.to(device=current.device, dtype=torch.float32)
     expected_affinity = (
         current.shape[0],
         config.iterations,
@@ -351,9 +329,12 @@ def compile_dyspn_plan(
             f"per-iteration affinity must have shape {expected_affinity}, "
             f"got {tuple(logits.shape)}"
         )
-    if inputs.offsets is None:
+    if decoded.residual_offsets_yx is None:
         raise ValueError("DySPN requires per-iteration offsets")
-    residual_yx = inputs.offsets.to(device=current.device, dtype=torch.float32)
+    residual_yx = decoded.residual_offsets_yx.to(
+        device=current.device,
+        dtype=torch.float32,
+    )
     expected_offsets = (
         current.shape[0],
         config.iterations,
@@ -376,16 +357,16 @@ def compile_dyspn_plan(
     offsets_xy = base + residual_xy
     affinity = torch.softmax(logits, dim=2).unsqueeze(3)
 
-    if inputs.sparse_depth is None:
+    if decoded.sparse_depth is None:
         raise ValueError("DySPN soft-post fusion requires sparse_depth")
-    sparse = as_nchw(inputs.sparse_depth, "sparse_depth", device=current.device)
+    sparse = as_nchw(decoded.sparse_depth, "sparse_depth", device=current.device)
     if sparse.shape != current.shape:
         raise ValueError("sparse_depth must have the same shape as current")
-    if inputs.confidence is None:
+    if decoded.confidence_logits is None:
         raise ValueError("DySPN soft-post fusion requires confidence logits")
     confidence_logits = as_nchw(
-        inputs.confidence,
-        "confidence",
+        decoded.confidence_logits,
+        "confidence_logits",
         device=current.device,
     )
     if confidence_logits.shape != current.shape:
@@ -470,15 +451,16 @@ def _edge_sum(value: torch.Tensor, kernel: int) -> torch.Tensor:
 
 def compile_dyspn_nlpm_plan(
     config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-    initial: torch.Tensor,
+    decoded: DecodedSPNParameters,
 ) -> CanonicalSPNPlan:
-    del initial
-    guidance = _neighbor_map(inputs.affinity, current, 48, "affinity")
-    if inputs.attention is None:
+    current = decoded.current
+    guidance = _neighbor_map(decoded.raw_affinity, current, 48, "raw_affinity")
+    if decoded.attention_logits is None:
         raise ValueError("DySPN NLPM requires per-iteration attention")
-    attention_logits = inputs.attention.to(device=current.device, dtype=torch.float32)
+    attention_logits = decoded.attention_logits.to(
+        device=current.device,
+        dtype=torch.float32,
+    )
     expected_attention = (
         current.shape[0],
         config.iterations,
@@ -492,10 +474,14 @@ def compile_dyspn_nlpm_plan(
             f"got {tuple(attention_logits.shape)}"
         )
     attention = torch.sigmoid(attention_logits)
-    sparse, _ = _sparse_and_mask(inputs, current)
-    if inputs.confidence is None:
+    sparse, _ = _sparse_and_mask(decoded, current)
+    if decoded.confidence_probability is None:
         raise ValueError("DySPN NLPM requires sparse confidence")
-    confidence = as_nchw(inputs.confidence, "confidence", device=current.device)
+    confidence = as_nchw(
+        decoded.confidence_probability,
+        "confidence_probability",
+        device=current.device,
+    )
     if confidence.shape != current.shape:
         raise ValueError("DySPN NLPM confidence must have the same shape as current")
 
@@ -550,179 +536,4 @@ def compile_dyspn_nlpm_plan(
         reduction_mode=ReductionMode.GROUPED,
         reduction_groups=groups,
         group_scale=group_scale,
-    )
-
-
-def _generic_offsets(
-    config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-) -> torch.Tensor:
-    if config.neighbor_mode in {NeighborMode.GRID, NeighborMode.DILATED}:
-        if config.num_neighbors != 8:
-            raise ValueError("generic GRID/DILATED mode requires eight neighbors")
-        scale = float(config.dilation if config.neighbor_mode is NeighborMode.DILATED else 1)
-        values = tuple((x * scale, y * scale) for x, y in GRID8_XY)
-        return _base_offsets(values, current).unsqueeze(1)
-    if config.affinity_mode is AffinityMode.STATIC:
-        _, total = _static_offsets(config, inputs, current)
-        return total.unsqueeze(1)
-    if inputs.offsets is None:
-        raise ValueError("OFFSET neighbor mode requires offsets")
-    offsets = inputs.offsets.to(device=current.device, dtype=torch.float32)
-    expected = (
-        current.shape[0],
-        config.iterations,
-        config.num_neighbors,
-        2,
-        current.shape[2],
-        current.shape[3],
-    )
-    if tuple(offsets.shape) != expected:
-        raise ValueError(
-            f"per-iteration offsets must have shape {expected}, got {tuple(offsets.shape)}"
-        )
-    selected = offsets[:, :, :, [1, 0]] if config.offset_mode is OffsetMode.RESIDUAL_YX else offsets
-    if config.offset_mode is OffsetMode.ABSOLUTE_XY:
-        return selected
-    if not config.base_offsets_xy:
-        raise ValueError("residual offsets require base_offsets_xy")
-    return _base_offsets(config.base_offsets_xy, current).unsqueeze(1) + selected
-
-
-def _generic_affinity(
-    config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-) -> torch.Tensor:
-    if config.affinity_mode is AffinityMode.STATIC:
-        return _neighbor_map(
-            inputs.affinity,
-            current,
-            config.num_neighbors,
-            "affinity",
-        ).unsqueeze(1)
-    tensor = inputs.affinity.to(device=current.device, dtype=torch.float32)
-    expected = (
-        current.shape[0],
-        config.iterations,
-        config.num_neighbors,
-        current.shape[2],
-        current.shape[3],
-    )
-    if tuple(tensor.shape) != expected:
-        raise ValueError(
-            f"per-iteration affinity must have shape {expected}, got {tuple(tensor.shape)}"
-        )
-    return tensor
-
-
-def _pretransform_affinity(
-    affinity: torch.Tensor,
-    config: SPNConfig,
-) -> torch.Tensor:
-    if config.normalization not in {NormalizationMode.TC, NormalizationMode.TGASS}:
-        return affinity
-    scale = (
-        float(config.num_neighbors)
-        if config.normalization is NormalizationMode.TC
-        else config.affinity_gamma * float(config.num_neighbors) + 1.0e-8
-    )
-    return torch.tanh(affinity / config.tanh_temperature) / scale
-
-
-def _normalize_affinity(
-    affinity: torch.Tensor,
-    config: SPNConfig,
-) -> torch.Tensor:
-    if config.normalization is NormalizationMode.SOFTMAX:
-        return torch.softmax(affinity, dim=2)
-    if config.normalization is NormalizationMode.TC:
-        return affinity
-    if config.normalization is NormalizationMode.DYSPN_NLPM:
-        raise ValueError("DYSPN_NLPM requires the named NLPM adapter")
-    denominator = torch.sum(torch.abs(affinity), dim=2, keepdim=True) + config.eps
-    if config.normalization in {NormalizationMode.ASS, NormalizationMode.TGASS}:
-        denominator = torch.where(
-            denominator < 1.0,
-            torch.ones_like(denominator),
-            denominator,
-        )
-    return affinity / denominator
-
-
-def _sample_confidence_by_step(
-    confidence: torch.Tensor,
-    offsets: torch.Tensor,
-    config: SPNConfig,
-) -> torch.Tensor:
-    batch, steps, neighbors, _, height, width = offsets.shape
-    source = confidence[:, None].expand(batch, steps, 1, height, width)
-    sampled = sample_neighbors(
-        source.reshape(batch * steps, 1, height, width),
-        offsets.reshape(batch * steps, neighbors, 2, height, width).detach(),
-        config.sampling_mode,
-        config.padding_mode,
-        align_corners=config.align_corners,
-    )
-    return sampled[:, :, 0].reshape(batch, steps, neighbors, height, width)
-
-
-def compile_generic_plan(
-    config: SPNConfig,
-    inputs: SPNInputs,
-    current: torch.Tensor,
-    initial: torch.Tensor,
-) -> CanonicalSPNPlan:
-    if config.affinity_layout is not AffinityLayout.TARGET:
-        raise ValueError("generic plan accepts only target-layout affinity")
-    if config.anchor_mode is AnchorMode.INITIAL_CURRENT:
-        raise ValueError("generic INITIAL_CURRENT requires the named NLPM adapter")
-    offsets = _generic_offsets(config, inputs, current)
-    affinity = _pretransform_affinity(
-        _generic_affinity(config, inputs, current),
-        config,
-    )
-    if config.neighbor_confidence is NeighborConfidenceMode.SAMPLE_AT_NEIGHBOR:
-        if inputs.confidence is None:
-            raise ValueError("neighbor confidence sampling requires confidence")
-        confidence = as_nchw(inputs.confidence, "confidence", device=current.device)
-        if confidence.shape != (current.shape[0], 1, current.shape[2], current.shape[3]):
-            raise ValueError("confidence must have shape [B,1,H,W]")
-        affinity = affinity * _sample_confidence_by_step(confidence, offsets, config)
-    affinity = _normalize_affinity(affinity, config)
-    residual = 1.0 - torch.sum(affinity, dim=2, keepdim=True)
-    zeros = torch.zeros_like(residual)
-    current_affinity = residual if config.anchor_mode is AnchorMode.CURRENT else zeros
-    initial_affinity = residual if config.anchor_mode is AnchorMode.INITIAL else zeros
-
-    pre_gate = pre_value = post_gate = post_value = None
-    if config.sparse_fusion is not SparseFusionMode.NONE:
-        sparse, mask = _sparse_and_mask(inputs, current)
-        if config.sparse_fusion is SparseFusionMode.HARD_PRE:
-            pre_gate, pre_value = mask.unsqueeze(1), sparse.unsqueeze(1)
-        elif config.sparse_fusion is SparseFusionMode.HARD_POST:
-            post_gate, post_value = mask.unsqueeze(1), sparse.unsqueeze(1)
-        elif config.sparse_fusion is SparseFusionMode.CSPN_CODE_POST:
-            post_gate, post_value = mask.unsqueeze(1), initial.unsqueeze(1)
-        elif config.sparse_fusion is SparseFusionMode.SOFT_POST:
-            if inputs.confidence is None:
-                raise ValueError("SOFT_POST requires confidence")
-            confidence = as_nchw(inputs.confidence, "confidence", device=current.device)
-            if confidence.shape != current.shape:
-                raise ValueError("confidence must have the same shape as current")
-            post_gate = (confidence * mask).unsqueeze(1)
-            post_value = sparse.unsqueeze(1)
-    return _make_plan(
-        config=config,
-        current=current,
-        offsets_xy=offsets,
-        neighbor_affinity=affinity.unsqueeze(3),
-        current_affinity=current_affinity,
-        initial_affinity=initial_affinity,
-        pre_gate=pre_gate,
-        pre_value=pre_value,
-        post_gate=post_gate,
-        post_value=post_value,
-        reduction_mode=ReductionMode.TORCH_SUM,
     )

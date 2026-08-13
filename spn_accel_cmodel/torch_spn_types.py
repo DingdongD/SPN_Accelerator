@@ -73,7 +73,6 @@ class AffinityLayout(Enum):
 
 
 class SPNProfile(Enum):
-    GENERIC = auto()
     CSPN = auto()
     NLSPN = auto()
     COMPLETIONFORMER = auto()
@@ -118,6 +117,7 @@ DYSPN_BASE_XY = {
 
 @dataclass(frozen=True)
 class SPNConfig:
+    profile: SPNProfile
     iterations: int
     num_neighbors: int
     neighbor_mode: NeighborMode
@@ -130,7 +130,6 @@ class SPNConfig:
     neighbor_confidence: NeighborConfidenceMode = NeighborConfidenceMode.NONE
     sparse_fusion: SparseFusionMode = SparseFusionMode.NONE
     affinity_layout: AffinityLayout = AffinityLayout.TARGET
-    profile: SPNProfile = SPNProfile.GENERIC
     dilation: int = 1
     eps: float = 1.0e-4
     tanh_temperature: float = 1.0
@@ -273,18 +272,6 @@ class SPNConfig:
             profile=SPNProfile.DYSPN_NLPM,
             align_corners=True,
         )
-
-
-@dataclass
-class SPNInputs:
-    current: torch.Tensor
-    affinity: torch.Tensor
-    initial: torch.Tensor | None = None
-    offsets: torch.Tensor | None = None
-    confidence: torch.Tensor | None = None
-    sparse_depth: torch.Tensor | None = None
-    sparse_mask: torch.Tensor | None = None
-    attention: torch.Tensor | None = None
 
 
 @dataclass
