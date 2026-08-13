@@ -287,6 +287,48 @@ class SPNInputs:
     attention: torch.Tensor | None = None
 
 
+@dataclass
+class CSPNRawInputs:
+    guidance: torch.Tensor
+    blur_depth: torch.Tensor
+    sparse_depth: torch.Tensor | None = None
+
+
+@dataclass
+class NLSPNRawInputs:
+    feat_init: torch.Tensor
+    guidance: torch.Tensor
+    confidence_probability: torch.Tensor | None = None
+    feat_fix: torch.Tensor | None = None
+    rgb: torch.Tensor | None = None
+
+
+@dataclass
+class CompletionFormerRawInputs:
+    pred_init: torch.Tensor
+    guidance: torch.Tensor
+    confidence_probability: torch.Tensor
+    sparse_depth: torch.Tensor
+    rgb: torch.Tensor | None = None
+
+
+@dataclass
+class DySPNRawInputs:
+    feat_init: torch.Tensor
+    guide: torch.Tensor
+    sparse_depth: torch.Tensor
+    confidence_logits: torch.Tensor
+
+
+@dataclass
+class DySPNNLPMRawInputs:
+    feat_init: torch.Tensor
+    guidance: torch.Tensor
+    dynamic_logits: torch.Tensor
+    sparse_depth: torch.Tensor
+    confidence_probability: torch.Tensor
+
+
 @dataclass(frozen=True)
 class CanonicalSPNPlan:
     iterations: int
