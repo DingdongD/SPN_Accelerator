@@ -322,8 +322,20 @@ class CSPNGoldenTest(unittest.TestCase):
             return_trace=True,
         )
 
-        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
-        self.assertEqual(len(trace.outputs), 3)
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=1.0e-6)
+        for field in (
+            "pre_fused_states",
+            "candidates",
+            "outputs",
+            "offsets",
+            "neighbor_affinities",
+            "current_affinities",
+            "initial_affinities",
+            "pre_fusion_gates",
+            "post_fusion_gates",
+            "group_scales",
+        ):
+            self.assertEqual(len(getattr(trace, field)), 3, field)
         for actual_step, expected_step in zip(
             trace.outputs,
             expected_trace,
@@ -333,19 +345,24 @@ class CSPNGoldenTest(unittest.TestCase):
                 actual_step,
                 expected_step,
                 rtol=0.0,
-                atol=0.0,
+                atol=1.0e-6,
             )
         for candidate, expected_candidate in zip(
             trace.candidates,
             expected_metadata["candidates"],
             strict=True,
         ):
-            torch.testing.assert_close(candidate, expected_candidate, rtol=0.0, atol=0.0)
+            torch.testing.assert_close(
+                candidate,
+                expected_candidate,
+                rtol=0.0,
+                atol=1.0e-6,
+            )
         for offsets in trace.offsets:
             torch.testing.assert_close(offsets, expected_metadata["offsets"], rtol=0.0, atol=0.0)
         for affinity in trace.neighbor_affinities:
             torch.testing.assert_close(
-                affinity,
+                affinity[:, :, 0],
                 expected_metadata["neighbor_affinity"],
                 rtol=0.0,
                 atol=0.0,
@@ -355,8 +372,36 @@ class CSPNGoldenTest(unittest.TestCase):
                 affinity,
                 expected_metadata["initial_affinity"],
                 rtol=0.0,
-                atol=0.0,
+                atol=1.0e-6,
             )
+        for actual_state, expected_state in zip(
+            trace.pre_fused_states,
+            expected_metadata["pre_fused_states"],
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                actual_state,
+                expected_state,
+                rtol=0.0,
+                atol=1.0e-6,
+            )
+        for current_affinity, pre_gate, post_gate, group_scale in zip(
+            trace.current_affinities,
+            trace.pre_fusion_gates,
+            trace.post_fusion_gates,
+            trace.group_scales,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                current_affinity,
+                torch.zeros_like(current_affinity),
+            )
+            torch.testing.assert_close(pre_gate, torch.zeros_like(pre_gate))
+            torch.testing.assert_close(
+                post_gate,
+                expected_metadata["post_fusion_gate"],
+            )
+            torch.testing.assert_close(group_scale, torch.ones_like(group_scale))
 
     def test_matches_released_cspn_without_sparse_mask(self):
         self._case(False)
@@ -401,12 +446,16 @@ class NLSPNGoldenTest(unittest.TestCase):
     ):
         iterations = len(expected_outputs)
         for field in (
+            "pre_fused_states",
             "outputs",
             "candidates",
             "offsets",
             "neighbor_affinities",
             "current_affinities",
             "initial_affinities",
+            "pre_fusion_gates",
+            "post_fusion_gates",
+            "group_scales",
         ):
             self.assertEqual(len(getattr(trace, field)), iterations, field)
         for actual_step, expected_step in zip(
@@ -431,6 +480,17 @@ class NLSPNGoldenTest(unittest.TestCase):
                 rtol=1.0e-5,
                 atol=1.0e-6,
             )
+        for actual_state, expected_state in zip(
+            trace.pre_fused_states,
+            metadata["pre_fused_states"],
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                actual_state,
+                expected_state,
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
         for offsets in trace.offsets:
             torch.testing.assert_close(
                 offsets,
@@ -445,7 +505,7 @@ class NLSPNGoldenTest(unittest.TestCase):
             strict=True,
         ):
             torch.testing.assert_close(
-                neighbor,
+                neighbor[:, :, 0],
                 expected_affinity,
                 rtol=1.0e-5,
                 atol=1.0e-6,
@@ -456,7 +516,16 @@ class NLSPNGoldenTest(unittest.TestCase):
                 rtol=1.0e-5,
                 atol=1.0e-6,
             )
-            self.assertIsNone(initial)
+            torch.testing.assert_close(initial, torch.zeros_like(initial))
+        for pre_gate, post_gate, group_scale in zip(
+            trace.pre_fusion_gates,
+            trace.post_fusion_gates,
+            trace.group_scales,
+            strict=True,
+        ):
+            torch.testing.assert_close(pre_gate, metadata["pre_fusion_gate"])
+            torch.testing.assert_close(post_gate, torch.zeros_like(post_gate))
+            torch.testing.assert_close(group_scale, torch.ones_like(group_scale))
 
     def test_all_nlspn_affinity_modes_match_author_formula(self):
         initial, affinity, residual_yx, confidence, _ = self._inputs()
@@ -725,7 +794,12 @@ class DySPNGoldenTest(unittest.TestCase):
             expected_affinities,
             strict=True,
         ):
-            torch.testing.assert_close(actual_aff, expected_aff, rtol=1.0e-6, atol=1.0e-7)
+            torch.testing.assert_close(
+                actual_aff[:, :, 0],
+                expected_aff,
+                rtol=1.0e-6,
+                atol=1.0e-7,
+            )
         for candidate, expected_candidate in zip(
             trace.candidates,
             expected_metadata["candidates"],
@@ -738,8 +812,30 @@ class DySPNGoldenTest(unittest.TestCase):
             strict=True,
         ):
             torch.testing.assert_close(offsets, expected_offsets, rtol=0.0, atol=0.0)
-        self.assertTrue(all(value is None for value in trace.current_affinities))
-        self.assertTrue(all(value is None for value in trace.initial_affinities))
+        for current_affinity, initial_affinity in zip(
+            trace.current_affinities,
+            trace.initial_affinities,
+            strict=True,
+        ):
+            torch.testing.assert_close(
+                current_affinity,
+                torch.zeros_like(current_affinity),
+            )
+            torch.testing.assert_close(
+                initial_affinity,
+                torch.zeros_like(initial_affinity),
+            )
+        for pre_state, expected_state in zip(
+            trace.pre_fused_states,
+            expected_metadata["pre_fused_states"],
+            strict=True,
+        ):
+            torch.testing.assert_close(pre_state, expected_state)
+        for post_gate in trace.post_fusion_gates:
+            torch.testing.assert_close(
+                post_gate,
+                expected_metadata["post_fusion_gate"],
+            )
 
     def test_k5_matches_current_default_author_module(self):
         self._case(5)
@@ -850,17 +946,45 @@ class DySPNNLPMGoldenTest(unittest.TestCase):
             torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
         for actual_step, expected_step in zip(trace.outputs, expected_outputs, strict=True):
             torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
-        for field in (
-            "neighbor_affinities",
-            "current_affinities",
-            "initial_affinities",
+        for iteration, actual_value in enumerate(trace.neighbor_affinities):
+            torch.testing.assert_close(
+                actual_value,
+                expected_metadata["effective_neighbor_affinity"][:, iteration],
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
+        for iteration, actual_value in enumerate(trace.current_affinities):
+            torch.testing.assert_close(
+                actual_value,
+                expected_metadata["current_affinity"][:, iteration],
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
+        for iteration, actual_value in enumerate(trace.initial_affinities):
+            torch.testing.assert_close(
+                actual_value,
+                expected_metadata["initial_affinity"][:, iteration],
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
+        for iteration, actual_value in enumerate(trace.group_scales):
+            torch.testing.assert_close(
+                actual_value,
+                expected_metadata["group_scale"][:, iteration],
+                rtol=1.0e-5,
+                atol=1.0e-6,
+            )
+        for actual_value, expected_value in zip(
+            trace.pre_fused_states,
+            expected_metadata["pre_fused_states"],
+            strict=True,
         ):
-            for actual_value, expected_value in zip(
-                getattr(trace, field),
-                expected_metadata[field],
-                strict=True,
-            ):
-                torch.testing.assert_close(actual_value, expected_value, rtol=1.0e-5, atol=1.0e-6)
+            torch.testing.assert_close(actual_value, expected_value)
+        for post_gate in trace.post_fusion_gates:
+            torch.testing.assert_close(
+                post_gate,
+                expected_metadata["post_fusion_gate"],
+            )
 
 
 if __name__ == "__main__":

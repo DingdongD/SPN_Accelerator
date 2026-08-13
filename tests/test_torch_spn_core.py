@@ -1,5 +1,8 @@
 import unittest
+import ast
+import inspect
 from dataclasses import replace
+from unittest import mock
 
 
 try:
@@ -8,15 +11,28 @@ except ImportError:  # pragma: no cover - optional validation dependency
     torch = None
 
 if torch is not None:
-    from spn_accel_cmodel import torch_spn_types
+    from spn_accel_cmodel import (
+        torch_functional,
+        torch_spn_adapters,
+        torch_spn_core,
+        torch_spn_types,
+    )
     from spn_accel_cmodel.torch_spn_core import sample_neighbors as core_sample_neighbors
     from spn_accel_cmodel.torch_functional import (
         CanonicalSPNPlan,
+        AffinityLayout,
+        AffinityMode,
+        AnchorMode,
+        NeighborMode,
+        OffsetMode,
         PaddingMode,
         ReductionMode,
         SPNConfig,
+        SPNInputs,
         SPNProfile,
         SamplingMode,
+        SparseFusionMode,
+        UnifiedSPN,
         propagate_canonical,
         validate_plan,
     )
@@ -64,6 +80,17 @@ class CanonicalTypeTest(unittest.TestCase):
             {member.name for member in ReductionMode},
             {"TORCH_SUM", "SEQUENTIAL", "GROUPED"},
         )
+
+    def test_package_exports_canonical_plan_and_core(self):
+        from spn_accel_cmodel import (
+            CanonicalSPNPlan as PackagePlan,
+            ReductionMode as PackageReductionMode,
+            propagate_canonical as package_core,
+        )
+
+        self.assertIs(PackagePlan, CanonicalSPNPlan)
+        self.assertIs(PackageReductionMode, ReductionMode)
+        self.assertIs(package_core, propagate_canonical)
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
@@ -175,6 +202,123 @@ class CanonicalCoreTest(unittest.TestCase):
         )
         validate_plan(state, state, plan)
         self.assertTrue(torch.isnan(propagate_canonical(state, state, plan)).all())
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class StructuralUnificationTest(unittest.TestCase):
+    def test_only_canonical_core_loops_over_iterations(self):
+        offenders = []
+
+        class LoopVisitor(ast.NodeVisitor):
+            def __init__(self):
+                self.function = None
+
+            def visit_FunctionDef(self, node):
+                previous = self.function
+                self.function = node.name
+                self.generic_visit(node)
+                self.function = previous
+
+            def visit_For(self, node):
+                iterator = ast.unparse(node.iter)
+                if "iterations" in iterator:
+                    offenders.append((self.function, iterator))
+                self.generic_visit(node)
+
+        for module in (torch_functional, torch_spn_core, torch_spn_adapters):
+            LoopVisitor().visit(ast.parse(inspect.getsource(module)))
+        self.assertEqual(
+            offenders,
+            [("propagate_canonical", "range(plan.iterations)")],
+        )
+
+    def test_profile_specific_forward_methods_are_removed(self):
+        forbidden = {
+            "_forward_cspn",
+            "_forward_nlspn",
+            "_forward_dyspn",
+            "_forward_dyspn_nlpm",
+            "_forward_generic",
+        }
+        self.assertTrue(forbidden.isdisjoint(dir(UnifiedSPN)))
+
+    def test_each_profile_calls_the_canonical_core_once(self):
+        state = torch.ones((1, 1, 3, 4))
+        zeros = torch.zeros_like(state)
+        generic = SPNConfig(
+            iterations=1,
+            num_neighbors=1,
+            neighbor_mode=NeighborMode.OFFSET,
+            sampling_mode=SamplingMode.BILINEAR,
+            padding_mode=PaddingMode.ZEROS,
+            offset_mode=OffsetMode.ABSOLUTE_XY,
+            affinity_mode=AffinityMode.STATIC,
+            normalization=torch_spn_types.NormalizationMode.AS,
+            anchor_mode=AnchorMode.INITIAL,
+            sparse_fusion=SparseFusionMode.NONE,
+            affinity_layout=AffinityLayout.TARGET,
+        )
+        cases = (
+            (
+                SPNConfig.cspn(iterations=1),
+                SPNInputs(state, torch.ones((1, 8, 3, 4))),
+            ),
+            (
+                SPNConfig.nlspn(iterations=1),
+                SPNInputs(
+                    state,
+                    torch.ones((1, 8, 3, 4)),
+                    offsets=torch.zeros((1, 8, 2, 3, 4)),
+                    confidence=torch.ones_like(state),
+                ),
+            ),
+            (
+                SPNConfig.completionformer(iterations=1),
+                SPNInputs(
+                    state,
+                    torch.ones((1, 8, 3, 4)),
+                    offsets=torch.zeros((1, 8, 2, 3, 4)),
+                    confidence=torch.ones_like(state),
+                ),
+            ),
+            (
+                SPNConfig.dyspn(iterations=1),
+                SPNInputs(
+                    state,
+                    torch.zeros((1, 1, 5, 3, 4)),
+                    offsets=torch.zeros((1, 1, 5, 2, 3, 4)),
+                    confidence=zeros,
+                    sparse_depth=zeros,
+                ),
+            ),
+            (
+                SPNConfig.dyspn_nlpm(iterations=1),
+                SPNInputs(
+                    state,
+                    torch.ones((1, 48, 3, 4)),
+                    attention=torch.zeros((1, 1, 4, 3, 4)),
+                    confidence=zeros,
+                    sparse_depth=zeros,
+                ),
+            ),
+            (
+                generic,
+                SPNInputs(
+                    state,
+                    torch.ones((1, 1, 3, 4)),
+                    offsets=torch.zeros((1, 1, 2, 3, 4)),
+                ),
+            ),
+        )
+        for config, inputs in cases:
+            with self.subTest(profile=config.profile.name):
+                with mock.patch.object(
+                    torch_functional,
+                    "propagate_canonical",
+                    return_value=state,
+                ) as canonical:
+                    UnifiedSPN(config)(inputs)
+                canonical.assert_called_once()
 
 
 if __name__ == "__main__":

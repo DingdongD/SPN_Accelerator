@@ -6,11 +6,20 @@ from .tensor_engine import ConvMapping
 
 
 _TORCH_EXPORTS = {
+    "CanonicalSPNPlan",
     "NormalizationMode",
+    "ReductionMode",
     "SPNConfig",
     "SPNInputs",
     "SPNTrace",
     "UnifiedSPN",
+    "compile_completionformer_plan",
+    "compile_cspn_plan",
+    "compile_dyspn_nlpm_plan",
+    "compile_dyspn_plan",
+    "compile_generic_plan",
+    "compile_nlspn_plan",
+    "propagate_canonical",
 }
 
 
@@ -32,8 +41,17 @@ __all__ = [
     "ArrayOffsetProvider",
     "ConvMapping",
     "NormalizationMode",
+    "CanonicalSPNPlan",
+    "ReductionMode",
     "SPNConfig",
     "SPNInputs",
     "SPNTrace",
     "UnifiedSPN",
+    "compile_completionformer_plan",
+    "compile_cspn_plan",
+    "compile_dyspn_nlpm_plan",
+    "compile_dyspn_plan",
+    "compile_generic_plan",
+    "compile_nlspn_plan",
+    "propagate_canonical",
 ]

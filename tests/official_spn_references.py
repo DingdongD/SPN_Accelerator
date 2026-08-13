@@ -106,8 +106,10 @@ def reference_cspn(
     state = initial
     outputs = []
     candidates = []
+    pre_fused_states = []
     mask = sparse_depth.sign() if sparse_depth is not None else None
     for _ in range(iterations):
+        pre_fused_states.append(state)
         shifted_state = _cspn_shifted_channels(state)
         neighbor = torch.sum(gate * shifted_state, dim=1)[:, :, 1:-1, 1:-1]
         state = neighbor + (1.0 - gate_sum) * initial
@@ -116,13 +118,16 @@ def reference_cspn(
             state = (1.0 - mask) * state + mask * initial
         outputs.append(state)
     batch, _, height, width = initial.shape
-    offsets = torch.tensor(GRID8_XY, device=initial.device).view(1, 8, 2, 1, 1)
+    target_offsets = tuple((-x, -y) for x, y in GRID8_XY)
+    offsets = torch.tensor(target_offsets, device=initial.device).view(1, 8, 2, 1, 1)
     offsets = offsets.expand(batch, 8, 2, height, width)
     metadata = {
         "candidates": candidates,
         "offsets": offsets,
         "neighbor_affinity": gate[:, :, 0, 1:-1, 1:-1],
         "initial_affinity": 1.0 - gate_sum,
+        "pre_fused_states": pre_fused_states,
+        "post_fusion_gate": torch.zeros_like(initial) if mask is None else mask,
     }
     return state, outputs, metadata
 
@@ -170,6 +175,7 @@ def reference_nlspn(
 
     state = initial
     outputs = []
+    pre_fused_states = []
     mask = None
     if preserve_input:
         if sparse_depth is None:
@@ -178,10 +184,16 @@ def reference_nlspn(
     for _ in range(iterations):
         if mask is not None:
             state = (1.0 - mask) * state + mask * sparse_depth
+        pre_fused_states.append(state)
         samples = _sample_absolute_xy(state, total_xy, align_corners=True)
         state = torch.sum(samples * affinity[:, :, None], dim=1) + center * state
         outputs.append(state)
-    return state, outputs, affinity, center, {"offsets": total_xy, "candidates": outputs}
+    return state, outputs, affinity, center, {
+        "offsets": total_xy,
+        "candidates": outputs,
+        "pre_fused_states": pre_fused_states,
+        "pre_fusion_gate": torch.zeros_like(center) if mask is None else mask,
+    }
 
 
 def reference_dyspn(
@@ -205,8 +217,10 @@ def reference_dyspn(
     state = initial
     outputs = []
     candidates = []
+    pre_fused_states = []
     effective_affinities = []
     for iteration in range(iterations):
+        pre_fused_states.append(state)
         samples = _sample_absolute_xy(
             state,
             total_xy[:, iteration],
@@ -226,6 +240,8 @@ def reference_dyspn(
     return state, outputs, effective_affinities, {
         "candidates": candidates,
         "offsets": [total_xy[:, iteration] for iteration in range(iterations)],
+        "pre_fused_states": pre_fused_states,
+        "post_fusion_gate": confidence,
     }
 
 
@@ -335,10 +351,12 @@ def reference_dyspn_nlpm(
     state = initial
     candidates = []
     outputs = []
+    pre_fused_states = []
     neighbor_affinities = []
     current_affinities = []
     initial_affinities = []
     for iteration in range(iterations):
+        pre_fused_states.append(state)
         attn = attention[:, iteration]
         denominator = torch.sum(attn * abs_sums, dim=1, keepdim=True) + 1.0e-4
         guided = state * guidance
@@ -363,14 +381,25 @@ def reference_dyspn_nlpm(
             + sparse_confidence * sparse_depth
         )
         outputs.append(state)
+    group_scale = attention[:, :, 0:3].unsqueeze(3) / denominator_all.unsqueeze(3)
+    effective_neighbor_affinity = torch.cat(
+        (
+            shifted_guidance[:, None, 0:8, None] * group_scale[:, :, 0:1],
+            shifted_guidance[:, None, 8:24, None] * group_scale[:, :, 1:2],
+            shifted_guidance[:, None, 24:48, None] * group_scale[:, :, 2:3],
+        ),
+        dim=2,
+    )
     return state, candidates, outputs, {
         "neighbor_affinities": neighbor_affinities,
         "current_affinities": current_affinities,
         "initial_affinities": initial_affinities,
         "shifted_guidance": shifted_guidance,
         "offsets": offsets,
-        "group_scale": attention[:, :, 0:3].unsqueeze(3)
-        / denominator_all.unsqueeze(3),
+        "group_scale": group_scale,
+        "effective_neighbor_affinity": effective_neighbor_affinity,
         "current_affinity": attention[:, :, 3:4] / denominator_all,
         "initial_affinity": initial_numerator_all / denominator_all,
+        "pre_fused_states": pre_fused_states,
+        "post_fusion_gate": sparse_confidence,
     }
