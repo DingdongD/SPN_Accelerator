@@ -10,20 +10,32 @@ if torch is not None:
     from official_spn_references import (
         reference_cspn,
         reference_dyspn,
+        reference_dyspn_nlpm,
         reference_nlspn,
     )
     from spn_accel_cmodel.torch_spn_adapters import (
         compile_completionformer_plan,
         compile_cspn_plan,
         compile_dyspn_plan,
+        compile_dyspn_nlpm_plan,
+        compile_generic_plan,
         compile_nlspn_plan,
     )
     from spn_accel_cmodel.torch_spn_core import propagate_canonical
     from spn_accel_cmodel.torch_spn_types import (
+        AffinityLayout,
+        AffinityMode,
+        AnchorMode,
+        NeighborConfidenceMode,
+        NeighborMode,
+        NormalizationMode,
+        OffsetMode,
+        PaddingMode,
         ReductionMode,
         SPNConfig,
         SPNInputs,
-        NormalizationMode,
+        SamplingMode,
+        SparseFusionMode,
     )
 
 
@@ -291,6 +303,152 @@ class DySPNPlanTest(unittest.TestCase):
                 )
                 actual = propagate_canonical(initial, initial, plan)
                 torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class DySPNNLPMPlanTest(unittest.TestCase):
+    def test_multiscale_groups_compile_to_48_canonical_neighbors(self):
+        generator = torch.Generator().manual_seed(7721)
+        steps, height, width = 3, 5, 6
+        initial = torch.randn((1, 1, height, width), generator=generator)
+        guidance = torch.randn((1, 48, height, width), generator=generator) * 0.2
+        attention = torch.randn(
+            (1, steps, 4, height, width),
+            generator=generator,
+        )
+        sparse = torch.zeros_like(initial)
+        sparse[:, :, 2, 3] = 7.0
+        confidence = torch.sigmoid(
+            torch.randn((1, 1, height, width), generator=generator)
+        )
+        expected, _, _, metadata = reference_dyspn_nlpm(
+            initial,
+            guidance,
+            attention,
+            sparse,
+            confidence,
+        )
+        config = SPNConfig.dyspn_nlpm(iterations=steps)
+        plan = compile_dyspn_nlpm_plan(
+            config,
+            SPNInputs(
+                initial,
+                guidance,
+                attention=attention,
+                sparse_depth=sparse,
+                confidence=confidence,
+            ),
+            initial,
+            initial,
+        )
+        self.assertEqual(plan.reduction_groups, ((0, 8), (8, 24), (24, 48)))
+        self.assertIs(plan.reduction_mode, ReductionMode.GROUPED)
+        self.assertEqual(plan.offsets_xy.shape, (1, 1, 48, 2, height, width))
+        self.assertEqual(plan.group_scale.shape, (1, steps, 3, 1, height, width))
+        torch.testing.assert_close(
+            plan.neighbor_affinity[:, 0, :, 0],
+            metadata["shifted_guidance"],
+            rtol=0.0,
+            atol=0.0,
+        )
+        torch.testing.assert_close(
+            plan.group_scale,
+            metadata["group_scale"],
+            rtol=1.0e-5,
+            atol=1.0e-6,
+        )
+        torch.testing.assert_close(
+            plan.current_affinity,
+            metadata["current_affinity"],
+            rtol=1.0e-5,
+            atol=1.0e-6,
+        )
+        torch.testing.assert_close(
+            plan.initial_affinity,
+            metadata["initial_affinity"],
+            rtol=1.0e-5,
+            atol=1.0e-6,
+        )
+        actual = propagate_canonical(initial, initial, plan)
+        torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+
+
+@unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
+class GenericPlanTest(unittest.TestCase):
+    def test_absolute_initial_anchor_and_hard_post_compile_to_plan(self):
+        config = SPNConfig(
+            iterations=1,
+            num_neighbors=1,
+            neighbor_mode=NeighborMode.OFFSET,
+            sampling_mode=SamplingMode.BILINEAR,
+            padding_mode=PaddingMode.ZEROS,
+            offset_mode=OffsetMode.ABSOLUTE_XY,
+            affinity_mode=AffinityMode.STATIC,
+            normalization=NormalizationMode.AS,
+            anchor_mode=AnchorMode.INITIAL,
+            sparse_fusion=SparseFusionMode.HARD_POST,
+            affinity_layout=AffinityLayout.TARGET,
+        )
+        current = torch.ones((1, 1, 2, 3))
+        initial = torch.zeros_like(current)
+        sparse = torch.zeros_like(current)
+        sparse[:, :, 0, 1] = 9.0
+        inputs = SPNInputs(
+            current,
+            torch.full((1, 1, 2, 3), 0.5),
+            initial=initial,
+            offsets=torch.zeros((1, 1, 2, 2, 3)),
+            sparse_depth=sparse,
+        )
+        plan = compile_generic_plan(config, inputs, current, initial)
+        coefficient = 0.5 / (0.5 + 1.0e-4)
+        torch.testing.assert_close(
+            plan.neighbor_affinity,
+            torch.full_like(plan.neighbor_affinity, coefficient),
+        )
+        torch.testing.assert_close(
+            plan.initial_affinity,
+            torch.full_like(plan.initial_affinity, 1.0 - coefficient),
+        )
+        torch.testing.assert_close(plan.post_fusion_gate[:, 0], (sparse > 0).float())
+        actual = propagate_canonical(current, initial, plan)
+        expected = torch.full_like(current, coefficient)
+        expected[:, :, 0, 1] = 9.0
+        torch.testing.assert_close(actual, expected, rtol=1.0e-6, atol=1.0e-6)
+
+    def test_tgass_samples_confidence_after_tanh(self):
+        config = SPNConfig(
+            iterations=1,
+            num_neighbors=1,
+            neighbor_mode=NeighborMode.OFFSET,
+            sampling_mode=SamplingMode.BILINEAR,
+            padding_mode=PaddingMode.ZEROS,
+            offset_mode=OffsetMode.ABSOLUTE_XY,
+            affinity_mode=AffinityMode.STATIC,
+            normalization=NormalizationMode.TGASS,
+            anchor_mode=AnchorMode.INITIAL,
+            neighbor_confidence=NeighborConfidenceMode.SAMPLE_AT_NEIGHBOR,
+            affinity_gamma=0.5,
+        )
+        current = torch.full((1, 1, 2, 2), 4.0)
+        initial = torch.zeros_like(current)
+        plan = compile_generic_plan(
+            config,
+            SPNInputs(
+                current,
+                torch.full((1, 1, 2, 2), 2.0),
+                initial=initial,
+                offsets=torch.zeros((1, 1, 2, 2, 2)),
+                confidence=torch.full((1, 1, 2, 2), 0.25),
+            ),
+            current,
+            initial,
+        )
+        effective = torch.tanh(torch.tensor(2.0)) / 0.5 * 0.25
+        torch.testing.assert_close(
+            plan.neighbor_affinity,
+            torch.full_like(plan.neighbor_affinity, effective),
+        )
 
 
 if __name__ == "__main__":

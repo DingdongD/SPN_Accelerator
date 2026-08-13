@@ -254,6 +254,38 @@ def _edge_sum(value: torch.Tensor, kernel: int) -> torch.Tensor:
     return F.conv2d(value, _edge_weight(kernel, value.device), padding=kernel // 2)
 
 
+def _edge_offsets_xy(kernel: int) -> tuple[tuple[float, float], ...]:
+    radius = kernel // 2
+    return tuple(
+        (float(radius - column), float(radius - row))
+        for row in range(kernel)
+        for column in range(kernel)
+        if row in {0, kernel - 1} or column in {0, kernel - 1}
+    )
+
+
+def _shift_channels_to_target(
+    value: torch.Tensor,
+    offsets_xy: tuple[tuple[float, float], ...],
+) -> torch.Tensor:
+    _, _, height, width = value.shape
+    radius = max(int(max(abs(x), abs(y))) for x, y in offsets_xy)
+    padded = F.pad(value, (radius, radius, radius, radius))
+    shifted = []
+    for channel, (offset_x, offset_y) in enumerate(offsets_xy):
+        start_x = radius + int(offset_x)
+        start_y = radius + int(offset_y)
+        shifted.append(
+            padded[
+                :,
+                channel : channel + 1,
+                start_y : start_y + height,
+                start_x : start_x + width,
+            ]
+        )
+    return torch.cat(shifted, dim=1)
+
+
 def reference_dyspn_nlpm(
     initial: torch.Tensor,
     guidance: torch.Tensor,
@@ -283,6 +315,22 @@ def reference_dyspn_nlpm(
     )
     attention = torch.sigmoid(attention_logits)
     sparse_confidence = sparse_depth.sign() * confidence
+    denominator_all = (
+        torch.sum(attention * abs_sums[:, None], dim=2, keepdim=True) + 1.0e-4
+    )
+    initial_numerator_all = denominator_all - torch.sum(
+        attention * signed_sums[:, None],
+        dim=2,
+        keepdim=True,
+    )
+    offsets_xy = _edge_offsets_xy(3) + _edge_offsets_xy(5) + _edge_offsets_xy(7)
+    shifted_guidance = _shift_channels_to_target(guidance, offsets_xy)
+    offsets = torch.tensor(
+        offsets_xy,
+        dtype=torch.float32,
+        device=initial.device,
+    ).view(1, 48, 2, 1, 1)
+    offsets = offsets.expand(batch, 48, 2, height, width)
 
     state = initial
     candidates = []
@@ -319,4 +367,10 @@ def reference_dyspn_nlpm(
         "neighbor_affinities": neighbor_affinities,
         "current_affinities": current_affinities,
         "initial_affinities": initial_affinities,
+        "shifted_guidance": shifted_guidance,
+        "offsets": offsets,
+        "group_scale": attention[:, :, 0:3].unsqueeze(3)
+        / denominator_all.unsqueeze(3),
+        "current_affinity": attention[:, :, 3:4] / denominator_all,
+        "initial_affinity": initial_numerator_all / denominator_all,
     }
