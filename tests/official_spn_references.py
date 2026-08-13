@@ -21,6 +21,23 @@ GRID8_XY = (
     (1.0, 1.0),
 )
 
+DYSPN_BASE_XY = {
+    1: ((0.0, 0.0),),
+    3: ((-1.0, 0.0), (0.0, 0.0), (1.0, 0.0)),
+    5: ((0.0, -1.0), (-1.0, 0.0), (0.0, 0.0), (1.0, 0.0), (0.0, 1.0)),
+    9: (
+        (-1.0, -1.0),
+        (0.0, -1.0),
+        (1.0, -1.0),
+        (-1.0, 0.0),
+        (0.0, 0.0),
+        (1.0, 0.0),
+        (-1.0, 1.0),
+        (0.0, 1.0),
+        (1.0, 1.0),
+    ),
+}
+
 
 def _sample_absolute_xy(
     state: torch.Tensor,
@@ -153,3 +170,123 @@ def reference_nlspn(
         state = torch.sum(samples * affinity[:, :, None], dim=1) + center * state
         outputs.append(state)
     return state, outputs, affinity, center
+
+
+def reference_dyspn(
+    initial: torch.Tensor,
+    residual_yx: torch.Tensor,
+    logits: torch.Tensor,
+    sparse_depth: torch.Tensor,
+    confidence_logits: torch.Tensor,
+) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+    b, iterations, neighbors, _, h, w = residual_yx.shape
+    base = torch.tensor(
+        DYSPN_BASE_XY[neighbors],
+        dtype=torch.float32,
+        device=initial.device,
+    ).view(1, 1, neighbors, 2, 1, 1)
+    residual_xy = residual_yx[:, :, :, [1, 0]]
+    total_xy = base + residual_xy
+    affinities = torch.softmax(logits, dim=2)
+    confidence = torch.sigmoid(confidence_logits) * sparse_depth.sign()
+
+    state = initial
+    outputs = []
+    effective_affinities = []
+    for iteration in range(iterations):
+        samples = _sample_absolute_xy(
+            state,
+            total_xy[:, iteration],
+            align_corners=False,
+        )
+        candidate = torch.sum(
+            samples * affinities[:, iteration, :, None],
+            dim=1,
+        )
+        state = (1.0 - confidence) * candidate + confidence * sparse_depth
+        outputs.append(state)
+        effective_affinities.append(affinities[:, iteration])
+    return state, outputs, effective_affinities
+
+
+def _edge_weight(kernel: int, device: torch.device) -> torch.Tensor:
+    edge_indices = []
+    for row in range(kernel):
+        for column in range(kernel):
+            if row in {0, kernel - 1} or column in {0, kernel - 1}:
+                edge_indices.append(row * kernel + column)
+    weight = torch.zeros(
+        (1, len(edge_indices), kernel, kernel),
+        dtype=torch.float32,
+        device=device,
+    )
+    for channel, edge_index in enumerate(edge_indices):
+        weight[
+            0,
+            channel,
+            -(edge_index // kernel) - 1,
+            (-edge_index) % kernel - 1,
+        ] = 1.0
+    return weight
+
+
+def _edge_sum(value: torch.Tensor, kernel: int) -> torch.Tensor:
+    return F.conv2d(value, _edge_weight(kernel, value.device), padding=kernel // 2)
+
+
+def reference_dyspn_nlpm(
+    initial: torch.Tensor,
+    guidance: torch.Tensor,
+    attention_logits: torch.Tensor,
+    sparse_depth: torch.Tensor,
+    confidence: torch.Tensor,
+) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
+    iterations = attention_logits.shape[1]
+    batch, _, height, width = initial.shape
+    abs_sums = torch.cat(
+        (
+            _edge_sum(torch.abs(guidance[:, 0:8]), 3),
+            _edge_sum(torch.abs(guidance[:, 8:24]), 5),
+            _edge_sum(torch.abs(guidance[:, 24:48]), 7),
+            torch.ones((batch, 1, height, width), device=initial.device),
+        ),
+        dim=1,
+    )
+    signed_sums = torch.cat(
+        (
+            _edge_sum(guidance[:, 0:8], 3),
+            _edge_sum(guidance[:, 8:24], 5),
+            _edge_sum(guidance[:, 24:48], 7),
+            torch.ones((batch, 1, height, width), device=initial.device),
+        ),
+        dim=1,
+    )
+    attention = torch.sigmoid(attention_logits)
+    sparse_confidence = sparse_depth.sign() * confidence
+
+    state = initial
+    candidates = []
+    outputs = []
+    for iteration in range(iterations):
+        attn = attention[:, iteration]
+        denominator = torch.sum(attn * abs_sums, dim=1, keepdim=True) + 1.0e-4
+        guided = state * guidance
+        neighbor = (
+            attn[:, 0:1] * _edge_sum(guided[:, 0:8], 3)
+            + attn[:, 1:2] * _edge_sum(guided[:, 8:24], 5)
+            + attn[:, 2:3] * _edge_sum(guided[:, 24:48], 7)
+            + attn[:, 3:4] * state
+        )
+        initial_weight = denominator - torch.sum(
+            attn * signed_sums,
+            dim=1,
+            keepdim=True,
+        )
+        candidate = (neighbor + initial_weight * initial) / denominator
+        candidates.append(candidate)
+        state = (
+            (1.0 - sparse_confidence) * candidate
+            + sparse_confidence * sparse_depth
+        )
+        outputs.append(state)
+    return state, candidates, outputs

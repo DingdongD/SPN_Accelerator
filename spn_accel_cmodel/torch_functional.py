@@ -481,9 +481,158 @@ class UnifiedSPN(nn.Module):
         current: torch.Tensor,
         initial: torch.Tensor,
     ) -> tuple[torch.Tensor, SPNTrace]:
-        raise NotImplementedError(
-            f"profile {self.config.profile.name} is implemented in the DySPN TDD task"
+        if self.config.profile is SPNProfile.DYSPN:
+            return self._forward_dyspn(inputs, current)
+        if self.config.profile is SPNProfile.DYSPN_NLPM:
+            return self._forward_dyspn_nlpm(inputs, current, initial)
+        raise NotImplementedError(f"unsupported generic profile {self.config.profile.name}")
+
+    def _forward_dyspn(
+        self,
+        inputs: SPNInputs,
+        current: torch.Tensor,
+    ) -> tuple[torch.Tensor, SPNTrace]:
+        cfg = self.config
+        logits = _as_iteration_neighbor_map(inputs.affinity, current, cfg)
+        if inputs.offsets is None:
+            raise ValueError("DySPN requires per-iteration offsets")
+        residual_yx = inputs.offsets.to(device=current.device, dtype=torch.float32)
+        expected_offsets = (
+            current.shape[0],
+            cfg.iterations,
+            cfg.num_neighbors,
+            2,
+            current.shape[2],
+            current.shape[3],
         )
+        if tuple(residual_yx.shape) != expected_offsets:
+            raise ValueError(
+                f"DySPN offsets must have shape {expected_offsets}, got "
+                f"{tuple(residual_yx.shape)}"
+            )
+        residual_xy = residual_yx[:, :, :, [1, 0]]
+        base = torch.tensor(
+            cfg.base_offsets_xy,
+            device=current.device,
+            dtype=torch.float32,
+        ).view(1, 1, cfg.num_neighbors, 2, 1, 1)
+        total_xy = base + residual_xy
+        affinities = torch.softmax(logits, dim=2)
+
+        sparse = _required_sparse(inputs, current)
+        if inputs.confidence is None:
+            raise ValueError("DySPN soft-post fusion requires confidence logits")
+        confidence_logits = _as_nchw(inputs.confidence, "confidence").to(
+            device=current.device
+        )
+        if confidence_logits.shape != current.shape:
+            raise ValueError("DySPN confidence must have the same shape as current")
+        confidence = torch.sigmoid(confidence_logits) * sparse.sign()
+
+        state = current
+        trace = SPNTrace()
+        for iteration in range(cfg.iterations):
+            offsets = total_xy[:, iteration]
+            affinity = affinities[:, iteration]
+            samples = sample_neighbors(
+                state,
+                offsets,
+                cfg.sampling_mode,
+                cfg.padding_mode,
+                align_corners=cfg.align_corners,
+            )
+            candidate = torch.sum(samples * affinity[:, :, None], dim=1)
+            state = (1.0 - confidence) * candidate + confidence * sparse
+            trace.candidates.append(candidate)
+            trace.outputs.append(state)
+            trace.offsets.append(offsets)
+            trace.neighbor_affinities.append(affinity)
+            trace.current_affinities.append(None)
+            trace.initial_affinities.append(None)
+        return state, trace
+
+    def _forward_dyspn_nlpm(
+        self,
+        inputs: SPNInputs,
+        current: torch.Tensor,
+        initial: torch.Tensor,
+    ) -> tuple[torch.Tensor, SPNTrace]:
+        cfg = self.config
+        guidance = _as_neighbor_map(inputs.affinity, current, 48, "affinity")
+        if inputs.attention is None:
+            raise ValueError("DySPN NLPM requires per-iteration attention")
+        attention_logits = inputs.attention.to(device=current.device, dtype=torch.float32)
+        expected_attention = (
+            current.shape[0],
+            cfg.iterations,
+            4,
+            current.shape[2],
+            current.shape[3],
+        )
+        if tuple(attention_logits.shape) != expected_attention:
+            raise ValueError(
+                f"DySPN NLPM attention must have shape {expected_attention}, got "
+                f"{tuple(attention_logits.shape)}"
+            )
+        attention = torch.sigmoid(attention_logits)
+        sparse = _required_sparse(inputs, current)
+        if inputs.confidence is None:
+            raise ValueError("DySPN NLPM requires sparse confidence")
+        confidence = _as_nchw(inputs.confidence, "confidence").to(device=current.device)
+        if confidence.shape != current.shape:
+            raise ValueError("DySPN NLPM confidence must have the same shape as current")
+        sparse_confidence = sparse.sign() * confidence
+
+        batch, _, height, width = current.shape
+        ones = torch.ones((batch, 1, height, width), device=current.device)
+        abs_sums = torch.cat(
+            (
+                _edge_sum(torch.abs(guidance[:, 0:8]), 3),
+                _edge_sum(torch.abs(guidance[:, 8:24]), 5),
+                _edge_sum(torch.abs(guidance[:, 24:48]), 7),
+                ones,
+            ),
+            dim=1,
+        )
+        signed_sums = torch.cat(
+            (
+                _edge_sum(guidance[:, 0:8], 3),
+                _edge_sum(guidance[:, 8:24], 5),
+                _edge_sum(guidance[:, 24:48], 7),
+                ones,
+            ),
+            dim=1,
+        )
+
+        state = current
+        trace = SPNTrace()
+        for iteration in range(cfg.iterations):
+            attn = attention[:, iteration]
+            denominator = torch.sum(attn * abs_sums, dim=1, keepdim=True) + cfg.eps
+            guided = state * guidance
+            neighbor = (
+                attn[:, 0:1] * _edge_sum(guided[:, 0:8], 3)
+                + attn[:, 1:2] * _edge_sum(guided[:, 8:24], 5)
+                + attn[:, 2:3] * _edge_sum(guided[:, 24:48], 7)
+                + attn[:, 3:4] * state
+            )
+            initial_numerator = denominator - torch.sum(
+                attn * signed_sums,
+                dim=1,
+                keepdim=True,
+            )
+            candidate = (neighbor + initial_numerator * initial) / denominator
+            state = (
+                (1.0 - sparse_confidence) * candidate
+                + sparse_confidence * sparse
+            )
+            trace.candidates.append(candidate)
+            trace.outputs.append(state)
+            trace.offsets.append(torch.empty(0, device=current.device))
+            trace.neighbor_affinities.append(attn[:, 0:3] / denominator)
+            trace.current_affinities.append(attn[:, 3:4] / denominator)
+            trace.initial_affinities.append(initial_numerator / denominator)
+        return state, trace
 
 
 def _as_nchw(value: torch.Tensor, name: str) -> torch.Tensor:
@@ -515,6 +664,26 @@ def _as_neighbor_map(
         return tensor.expand(b, neighbors, h, w)
     except RuntimeError as exc:
         raise ValueError(f"{name} cannot broadcast to [B,K,H,W]") from exc
+
+
+def _as_iteration_neighbor_map(
+    value: torch.Tensor,
+    current: torch.Tensor,
+    cfg: SPNConfig,
+) -> torch.Tensor:
+    tensor = value.to(device=current.device, dtype=torch.float32)
+    expected = (
+        current.shape[0],
+        cfg.iterations,
+        cfg.num_neighbors,
+        current.shape[2],
+        current.shape[3],
+    )
+    if tuple(tensor.shape) != expected:
+        raise ValueError(
+            f"per-iteration affinity must have shape {expected}, got {tuple(tensor.shape)}"
+        )
+    return tensor
 
 
 def _static_residual_offsets(
@@ -562,6 +731,32 @@ def _cspn_shifted_channels(value: torch.Tensor) -> torch.Tensor:
         [F.pad(channel, padding) for channel, padding in zip(channels, paddings)],
         dim=1,
     )
+
+
+def _edge_sum(value: torch.Tensor, kernel: int) -> torch.Tensor:
+    edge_indices = []
+    for row in range(kernel):
+        for column in range(kernel):
+            if row in {0, kernel - 1} or column in {0, kernel - 1}:
+                edge_indices.append(row * kernel + column)
+    if value.shape[1] != len(edge_indices):
+        raise ValueError(
+            f"kernel {kernel} edge sum expects {len(edge_indices)} channels, "
+            f"got {value.shape[1]}"
+        )
+    weight = torch.zeros(
+        (1, len(edge_indices), kernel, kernel),
+        device=value.device,
+        dtype=torch.float32,
+    )
+    for channel, edge_index in enumerate(edge_indices):
+        weight[
+            0,
+            channel,
+            -(edge_index // kernel) - 1,
+            (-edge_index) % kernel - 1,
+        ] = 1.0
+    return F.conv2d(value, weight, padding=kernel // 2)
 
 
 def _required_sparse(inputs: SPNInputs, current: torch.Tensor) -> torch.Tensor:

@@ -17,7 +17,12 @@ from spn_accel_cmodel.torch_functional import (
     sample_neighbors,
 )
 
-from official_spn_references import reference_cspn, reference_nlspn
+from official_spn_references import (
+    reference_cspn,
+    reference_dyspn,
+    reference_dyspn_nlpm,
+    reference_nlspn,
+)
 
 
 class TorchSPNSamplingTest(unittest.TestCase):
@@ -273,6 +278,126 @@ class NLSPNGoldenTest(unittest.TestCase):
             )
         )
         torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+
+
+class DySPNGoldenTest(unittest.TestCase):
+    def _case(self, neighbors):
+        generator = torch.Generator().manual_seed(9183 + neighbors)
+        initial = _randn(generator, (1, 1, 4, 6))
+        residual_yx = _randn(generator, (1, 3, neighbors, 2, 4, 6), scale=0.3)
+        logits = _randn(generator, (1, 3, neighbors, 4, 6), scale=0.7)
+        sparse = torch.zeros_like(initial)
+        sparse[:, :, 0, 0] = 3.0
+        sparse[:, :, 2, 4] = 8.0
+        confidence_logits = _randn(generator, (1, 1, 4, 6))
+        expected, expected_trace, expected_affinities = reference_dyspn(
+            initial,
+            residual_yx,
+            logits,
+            sparse,
+            confidence_logits,
+        )
+        actual, trace = UnifiedSPN(
+            SPNConfig.dyspn(iterations=3, num_neighbors=neighbors)
+        )(
+            SPNInputs(
+                current=initial,
+                affinity=logits,
+                offsets=residual_yx,
+                confidence=confidence_logits,
+                sparse_depth=sparse,
+            ),
+            return_trace=True,
+        )
+        torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+        for actual_step, expected_step in zip(trace.outputs, expected_trace, strict=True):
+            torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
+        for actual_aff, expected_aff in zip(
+            trace.neighbor_affinities,
+            expected_affinities,
+            strict=True,
+        ):
+            torch.testing.assert_close(actual_aff, expected_aff, rtol=1.0e-6, atol=1.0e-7)
+
+    def test_k5_matches_current_default_author_module(self):
+        self._case(5)
+
+    def test_k9_matches_current_author_module(self):
+        self._case(9)
+
+    def test_each_iteration_uses_its_own_metadata(self):
+        generator = torch.Generator().manual_seed(771)
+        initial = _randn(generator, (1, 1, 3, 4))
+        residual = _randn(generator, (1, 2, 5, 2, 3, 4), scale=0.2)
+        logits = _randn(generator, (1, 2, 5, 3, 4))
+        sparse = torch.zeros_like(initial)
+        confidence = torch.zeros_like(initial)
+        model = UnifiedSPN(SPNConfig.dyspn(iterations=2, num_neighbors=5))
+        normal = model(
+            SPNInputs(initial, logits, offsets=residual, confidence=confidence, sparse_depth=sparse)
+        )
+        swapped = model(
+            SPNInputs(
+                initial,
+                logits.flip(1),
+                offsets=residual.flip(1),
+                confidence=confidence,
+                sparse_depth=sparse,
+            )
+        )
+        self.assertFalse(torch.allclose(normal, swapped))
+
+    def test_k1_out_of_bounds_sample_uses_zero_padding(self):
+        initial = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]])
+        residual_yx = torch.zeros((1, 1, 1, 2, 2, 2))
+        residual_yx[0, 0, 0, :, 0, 0] = torch.tensor([-0.5, -0.5])
+        actual = UnifiedSPN(SPNConfig.dyspn(iterations=1, num_neighbors=1))(
+            SPNInputs(
+                current=initial,
+                affinity=torch.zeros((1, 1, 1, 2, 2)),
+                offsets=residual_yx,
+                confidence=torch.zeros_like(initial),
+                sparse_depth=torch.zeros_like(initial),
+            )
+        )
+        torch.testing.assert_close(actual[0, 0, 0, 0], torch.tensor(0.25), atol=1.0e-6, rtol=0.0)
+
+
+class DySPNNLPMGoldenTest(unittest.TestCase):
+    def test_7x7_naive_nlpm_matches_author_operation_order(self):
+        generator = torch.Generator().manual_seed(555)
+        initial = _randn(generator, (1, 1, 7, 8))
+        guidance = _randn(generator, (1, 48, 7, 8), scale=0.15)
+        attention = _randn(generator, (1, 2, 4, 7, 8))
+        sparse = torch.zeros_like(initial)
+        sparse[:, :, 1, 2] = 5.0
+        confidence = torch.sigmoid(_randn(generator, (1, 1, 7, 8)))
+        expected, expected_candidates, expected_outputs = reference_dyspn_nlpm(
+            initial,
+            guidance,
+            attention,
+            sparse,
+            confidence,
+        )
+        actual, trace = UnifiedSPN(SPNConfig.dyspn_nlpm(iterations=2))(
+            SPNInputs(
+                current=initial,
+                affinity=guidance,
+                attention=attention,
+                confidence=confidence,
+                sparse_depth=sparse,
+            ),
+            return_trace=True,
+        )
+        torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
+        for actual_step, expected_step in zip(
+            trace.candidates,
+            expected_candidates,
+            strict=True,
+        ):
+            torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
+        for actual_step, expected_step in zip(trace.outputs, expected_outputs, strict=True):
+            torch.testing.assert_close(actual_step, expected_step, rtol=1.0e-5, atol=1.0e-6)
 
 
 if __name__ == "__main__":
