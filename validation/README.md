@@ -75,6 +75,13 @@ The broader Torch functional model lives in
 - youmi-zym/CompletionFormer commit `2744eddee9b57595dc3064f7d342569736a6803b`;
 - Kyakaka/DySPN commit `d4871eeabc8797d821873a2a41daf359466a7255`.
 
+This validation target is strictly a PyTorch FP32 propagation reference; it is
+separate from the accelerator CModel and the FPGA/RTL validation levels below.
+The author-level boundary accepts each released propagation module's raw
+tensors. NLSPN, CompletionFormer, and DySPN first execute an independently
+checked `conv_offset_aff` decode, then all five profiles compile a canonical
+plan and enter the same `propagate_canonical()` state loop.
+
 Run only the Torch profile goldens:
 
 ```bash
@@ -88,10 +95,13 @@ Run Torch plus the existing NumPy cross-check:
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-The NLSPN/CompletionFormer `legacy` switch is observable at the propagation
-boundary.  Current `legacy=False` source samples confidence with residual-only
-offsets in its 1x1 deformable gather; `legacy=True` adds the 3x3 base stencil.
-Both paths are tested.  Propagated state always uses base plus residual offsets.
+The tests use fixed random FP32 weights and inputs; they do not download or
+require pretrained checkpoints. A locally available official state dict can be
+loaded into the author frontend using an explicit parameter prefix. Decoder
+tensors, canonical coefficients, candidates, and per-iteration outputs are
+checked independently. NLSPN and CompletionFormer confidence is represented as
+a probability, whereas current DySPN confidence is represented as logits and
+sigmoided inside the propagation plan.
 
 Agreement here is FP32 semantic agreement, not a claim of bitwise equality
 with a CUDA DCNv2 kernel.  The acceptance threshold for interpolated paths is

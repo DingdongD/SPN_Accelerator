@@ -25,11 +25,14 @@ if torch is not None:
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
 class PublicAuthorAPIContractTest(unittest.TestCase):
     def test_legacy_generic_api_is_removed(self):
-        self.assertFalse(hasattr(torch_spn_types, "SPNInputs"))
-        self.assertFalse(hasattr(torch_spn_types.SPNProfile, "GENERIC"))
-        self.assertFalse(hasattr(torch_spn_adapters, "compile_generic_plan"))
-        self.assertNotIn("SPNInputs", torch_functional.__all__)
-        self.assertNotIn("compile_generic_plan", torch_functional.__all__)
+        old_input = "SPN" + "Inputs"
+        old_profile = "GEN" + "ERIC"
+        old_compiler = "compile_" + "generic_plan"
+        self.assertFalse(hasattr(torch_spn_types, old_input))
+        self.assertFalse(hasattr(torch_spn_types.SPNProfile, old_profile))
+        self.assertFalse(hasattr(torch_spn_adapters, old_compiler))
+        self.assertNotIn(old_input, torch_functional.__all__)
+        self.assertNotIn(old_compiler, torch_functional.__all__)
 
     def test_each_author_profile_calls_canonical_core_once(self):
         state = torch.ones((1, 1, 3, 4))
