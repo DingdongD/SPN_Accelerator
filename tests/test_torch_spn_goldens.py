@@ -279,6 +279,33 @@ class NLSPNGoldenTest(unittest.TestCase):
         )
         torch.testing.assert_close(actual, expected, rtol=1.0e-5, atol=1.0e-6)
 
+    def test_accepts_released_16_and_18_channel_offset_traces(self):
+        initial, affinity, residual_yx, _, _ = self._inputs()
+        model = UnifiedSPN(
+            SPNConfig.nlspn(
+                iterations=1,
+                confidence=False,
+                normalization=NormalizationMode.AS,
+            )
+        )
+        canonical = model(
+            SPNInputs(initial, affinity, offsets=residual_yx)
+        )
+        flattened16 = model(
+            SPNInputs(initial, affinity, offsets=residual_yx.reshape(1, 16, 5, 6))
+        )
+        with_center = torch.cat(
+            (
+                residual_yx[:, :4],
+                torch.zeros((1, 1, 2, 5, 6)),
+                residual_yx[:, 4:],
+            ),
+            dim=1,
+        ).reshape(1, 18, 5, 6)
+        flattened18 = model(SPNInputs(initial, affinity, offsets=with_center))
+        torch.testing.assert_close(flattened16, canonical)
+        torch.testing.assert_close(flattened18, canonical)
+
 
 class DySPNGoldenTest(unittest.TestCase):
     def _case(self, neighbors):

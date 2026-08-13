@@ -694,6 +694,24 @@ def _static_residual_offsets(
     if inputs.offsets is None:
         raise ValueError("offset propagation requires offsets")
     offsets = inputs.offsets.to(device=current.device, dtype=torch.float32)
+    if offsets.ndim == 4 and offsets.shape[1] in {
+        2 * cfg.num_neighbors,
+        2 * (cfg.num_neighbors + 1),
+    }:
+        points = offsets.shape[1] // 2
+        offsets = offsets.reshape(
+            offsets.shape[0],
+            points,
+            2,
+            offsets.shape[2],
+            offsets.shape[3],
+        )
+        if points == cfg.num_neighbors + 1:
+            center_index = cfg.num_neighbors // 2
+            offsets = torch.cat(
+                (offsets[:, :center_index], offsets[:, center_index + 1 :]),
+                dim=1,
+            )
     expected = (
         current.shape[0],
         cfg.num_neighbors,
