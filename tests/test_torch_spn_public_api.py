@@ -23,7 +23,21 @@ if torch is not None:
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
-class PublicAuthorAPIContractTest(unittest.TestCase):
+class PublicOfficialAPIContractTest(unittest.TestCase):
+    def test_public_frontend_names_are_explicitly_official(self):
+        expected = {
+            "CSPNOfficialFrontend",
+            "NLSPNOfficialFrontend",
+            "CompletionFormerOfficialFrontend",
+            "DySPNOfficialFrontend",
+            "DySPNNLPMOfficialFrontend",
+        }
+        self.assertTrue(expected.issubset(torch_functional.__all__))
+        model = UnifiedSPN(SPNConfig.nlspn(iterations=1))
+        self.assertTrue(hasattr(model, "official_frontend"))
+        old_frontend_name = "au" + "thor"
+        self.assertFalse(hasattr(model, old_frontend_name))
+
     def test_legacy_generic_api_is_removed(self):
         old_input = "SPN" + "Inputs"
         old_profile = "GEN" + "ERIC"
@@ -34,7 +48,7 @@ class PublicAuthorAPIContractTest(unittest.TestCase):
         self.assertNotIn(old_input, torch_functional.__all__)
         self.assertNotIn(old_compiler, torch_functional.__all__)
 
-    def test_each_author_profile_calls_canonical_core_once(self):
+    def test_each_official_profile_calls_canonical_core_once(self):
         state = torch.ones((1, 1, 3, 4))
         zeros = torch.zeros_like(state)
         cases = (

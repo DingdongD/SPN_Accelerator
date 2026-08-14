@@ -1,4 +1,4 @@
-"""Compile author-specific SPN metadata into canonical propagation plans."""
+"""Compile profile-specific official metadata into canonical SPN plans."""
 
 from __future__ import annotations
 

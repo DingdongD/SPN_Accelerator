@@ -13,7 +13,7 @@ if torch is not None:
     from spn_accel_cmodel import (
         torch_functional,
         torch_spn_adapters,
-        torch_spn_author,
+        torch_spn_official_frontend,
         torch_spn_core,
         torch_spn_types,
     )
@@ -207,7 +207,7 @@ class CanonicalCoreTest(unittest.TestCase):
             atol=0.0,
         )
 
-    def test_plan_allows_author_nan_values(self):
+    def test_plan_allows_official_nan_values(self):
         state = torch.zeros((1, 1, 1, 3))
         plan = replace(
             one_neighbor_plan(),
@@ -240,7 +240,7 @@ class StructuralUnificationTest(unittest.TestCase):
 
         for module in (
             torch_functional,
-            torch_spn_author,
+            torch_spn_official_frontend,
             torch_spn_core,
             torch_spn_adapters,
         ):

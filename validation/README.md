@@ -22,7 +22,7 @@ Subgraph CModel --> ACTSim / board JSON ---------- latency/traffic check
 
 | Level | Target | Implemented now | External golden required |
 |---|---|---|---|
-| L0 | SPN functional semantics | Yes: NumPy reference + unified Torch author-formula goldens | No |
+| L0 | SPN functional semantics | Yes: NumPy reference + unified Torch official-formula goldens | No |
 | L1a | Tensor compute cycles | Yes: SCALE-Sim v3 GEMM adapter/report parser | SCALE-Sim installation or saved report |
 | L1b | Conv traffic + cycles | Yes: SCALE-Sim Conv-tile adapter | SCALE-Sim installation |
 | L2 | SRAM banks / DMA | Yes: synthetic bank-conflict tests | Optional Ramulator2 for DRAM timing |
@@ -64,7 +64,7 @@ When PyTorch is available, `tests/test_recorded_trace.py` additionally checks:
 
 For quantized hardware, add the accelerator's fixed-point rounding/saturation rules as a second functional reference instead of changing this floating-point semantic golden.
 
-### Unified Torch author-code profiles
+### Unified Torch official-code profiles
 
 The broader Torch functional model lives in
 `spn_accel_cmodel/torch_functional.py`.  Its independent test oracles live in
@@ -77,7 +77,7 @@ The broader Torch functional model lives in
 
 This validation target is strictly a PyTorch FP32 propagation reference; it is
 separate from the accelerator CModel and the FPGA/RTL validation levels below.
-The author-level boundary accepts each released propagation module's raw
+The official-frontend boundary accepts each released propagation module's raw
 tensors. NLSPN, CompletionFormer, and DySPN first execute an independently
 checked `conv_offset_aff` decode, then all five profiles compile a canonical
 plan and enter the same `propagate_canonical()` state loop.
@@ -97,7 +97,7 @@ PYTHONPATH=. python -m unittest discover -s tests -v
 
 The tests use fixed random FP32 weights and inputs; they do not download or
 require pretrained checkpoints. A locally available official state dict can be
-loaded into the author frontend using an explicit parameter prefix. Decoder
+loaded into the official frontend using an explicit parameter prefix. Decoder
 tensors, canonical coefficients, candidates, and per-iteration outputs are
 checked independently. NLSPN and CompletionFormer confidence is represented as
 a probability, whereas current DySPN confidence is represented as logits and

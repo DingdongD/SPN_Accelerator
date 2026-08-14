@@ -114,7 +114,7 @@ where the released module owns it. A metadata adapter then creates a
 is the sole owner of the propagation iteration loop:
 
 ```text
-official RawInputs -> author parameter decode -> CanonicalSPNPlan
+official RawInputs -> official parameter decode -> CanonicalSPNPlan
                                                     |
 decoded current + initial --------------------------+
                                                     v
@@ -124,7 +124,7 @@ decoded current + initial --------------------------+
 The implementation is split accordingly:
 
 - `torch_spn_types.py`: public configuration, plan, and trace types;
-- `torch_spn_author.py`: official propagation-module parameter decoders;
+- `torch_spn_official_frontend.py`: official propagation-module parameter decoders;
 - `torch_spn_decoded.py`: internal post-decoder tensor contract;
 - `torch_spn_adapters.py`: CSPN/NLSPN/CompletionFormer/DySPN/NLPM metadata
   compilers;
@@ -132,7 +132,7 @@ The implementation is split accordingly:
   recurrence;
 - `torch_functional.py`: stable public exports and the `UnifiedSPN` wrapper.
 
-Canonical profiles preserve the author-code distinctions rather than treating
+Canonical profiles preserve the official-code distinctions rather than treating
 all SPNs as an eight-neighbor absolute-sum kernel:
 
 | Profile | Propagation semantics |
@@ -164,12 +164,12 @@ output, trace = model(
 )
 ```
 
-`model.author` owns the same `conv_offset_aff` and `aff_scale_const` parameter
+`model.official_frontend` owns the same `conv_offset_aff` and `aff_scale_const` parameter
 names as the official propagation module. Parameters can therefore be copied
 from a checkpoint already present locally with an explicit prefix:
 
 ```python
-model.author.load_official_parameters(
+model.official_frontend.load_official_parameters(
     local_state_dict,
     prefix="module.prop_layer.",
 )
@@ -197,7 +197,7 @@ plan = compile_nlspn_plan(config, decoded)
 output, trace = propagate_canonical(current, initial, plan, return_trace=True)
 ```
 
-Run the independent author-formula differential suite:
+Run the independent official-formula differential suite:
 
 ```bash
 python -m pip install -e '.[torch-validation]'
@@ -213,7 +213,7 @@ checks where operation ordering allows; interpolated FP32 paths use
 Released NLSPN and CompletionFormer repositories use DCNv2 as an implementation
 carrier for deformable gather and weighted reduction. DCNv2 is not part of the
 propagation abstraction or a dependency of this Torch model. Unit tests compare
-the independently restated author decoder and propagation formulas using the
+the independently restated official decoder and propagation formulas using the
 same fixed random inputs and parameters; no CUDA extension or downloaded
 checkpoint is involved.
 

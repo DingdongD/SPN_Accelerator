@@ -118,7 +118,7 @@ class NLSPNPlanTest(unittest.TestCase):
         values.update(overrides)
         return DecodedSPNParameters(**values)
 
-    def test_all_normalizations_compile_author_coefficients(self):
+    def test_all_normalizations_compile_official_coefficients(self):
         for mode in (
             NormalizationMode.AS,
             NormalizationMode.ASS,

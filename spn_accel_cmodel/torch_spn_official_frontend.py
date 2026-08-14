@@ -1,4 +1,4 @@
-"""Author-level parameter decoders for unified SPN propagation."""
+"""Official implementation frontends for unified SPN propagation."""
 
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ class _OfficialParameterLoader:
                 target.copy_(source.to(device=target.device, dtype=target.dtype))
 
 
-class _NLSPNFamilyAuthor(nn.Module, _OfficialParameterLoader):
+class _NLSPNFamilyOfficialFrontend(nn.Module, _OfficialParameterLoader):
     input_type: type
     profile: SPNProfile
     initial_field: str
@@ -136,21 +136,21 @@ class _NLSPNFamilyAuthor(nn.Module, _OfficialParameterLoader):
         )
 
 
-class NLSPNAuthor(_NLSPNFamilyAuthor):
+class NLSPNOfficialFrontend(_NLSPNFamilyOfficialFrontend):
     input_type = NLSPNRawInputs
     profile = SPNProfile.NLSPN
     initial_field = "feat_init"
     sparse_field = "feat_fix"
 
 
-class CompletionFormerAuthor(_NLSPNFamilyAuthor):
+class CompletionFormerOfficialFrontend(_NLSPNFamilyOfficialFrontend):
     input_type = CompletionFormerRawInputs
     profile = SPNProfile.COMPLETIONFORMER
     initial_field = "pred_init"
     sparse_field = "sparse_depth"
 
 
-class DySPNAuthor(nn.Module, _OfficialParameterLoader):
+class DySPNOfficialFrontend(nn.Module, _OfficialParameterLoader):
     input_type = DySPNRawInputs
     profile = SPNProfile.DYSPN
     _official_parameter_names = (
@@ -161,7 +161,7 @@ class DySPNAuthor(nn.Module, _OfficialParameterLoader):
     def __init__(self, config: SPNConfig):
         super().__init__()
         if config.profile is not self.profile:
-            raise ValueError("DySPNAuthor requires DYSPN config")
+            raise ValueError("DySPNOfficialFrontend requires DYSPN config")
         self.config = config
         channels = config.iterations * config.num_neighbors
         self.conv_offset_aff = nn.Conv2d(
@@ -225,14 +225,14 @@ class DySPNAuthor(nn.Module, _OfficialParameterLoader):
         )
 
 
-class CSPNAuthor(nn.Module):
+class CSPNOfficialFrontend(nn.Module):
     input_type = CSPNRawInputs
     profile = SPNProfile.CSPN
 
     def __init__(self, config: SPNConfig):
         super().__init__()
         if config.profile is not self.profile:
-            raise ValueError("CSPNAuthor requires CSPN config")
+            raise ValueError("CSPNOfficialFrontend requires CSPN config")
         self.config = config
 
     def decode(self, inputs: CSPNRawInputs) -> DecodedSPNParameters:
@@ -264,14 +264,14 @@ class CSPNAuthor(nn.Module):
         )
 
 
-class DySPNNLPMAuthor(nn.Module):
+class DySPNNLPMOfficialFrontend(nn.Module):
     input_type = DySPNNLPMRawInputs
     profile = SPNProfile.DYSPN_NLPM
 
     def __init__(self, config: SPNConfig):
         super().__init__()
         if config.profile is not self.profile:
-            raise ValueError("DySPNNLPMAuthor requires DYSPN_NLPM config")
+            raise ValueError("DySPNNLPMOfficialFrontend requires DYSPN_NLPM config")
         self.config = config
 
     def decode(self, inputs: DySPNNLPMRawInputs) -> DecodedSPNParameters:
@@ -316,10 +316,10 @@ class DySPNNLPMAuthor(nn.Module):
         )
 
 
-AUTHOR_BUILDERS = {
-    SPNProfile.CSPN: CSPNAuthor,
-    SPNProfile.NLSPN: NLSPNAuthor,
-    SPNProfile.COMPLETIONFORMER: CompletionFormerAuthor,
-    SPNProfile.DYSPN: DySPNAuthor,
-    SPNProfile.DYSPN_NLPM: DySPNNLPMAuthor,
+OFFICIAL_FRONTEND_BUILDERS = {
+    SPNProfile.CSPN: CSPNOfficialFrontend,
+    SPNProfile.NLSPN: NLSPNOfficialFrontend,
+    SPNProfile.COMPLETIONFORMER: CompletionFormerOfficialFrontend,
+    SPNProfile.DYSPN: DySPNOfficialFrontend,
+    SPNProfile.DYSPN_NLPM: DySPNNLPMOfficialFrontend,
 }

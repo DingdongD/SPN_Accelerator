@@ -39,7 +39,7 @@ DYSPN_BASE_XY = {
 }
 
 
-def reference_nlspn_author_decode(
+def reference_nlspn_official_decode(
     guidance: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
@@ -61,15 +61,15 @@ def reference_nlspn_author_decode(
     }
 
 
-def reference_completionformer_author_decode(
+def reference_completionformer_official_decode(
     guidance: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,
 ) -> dict[str, torch.Tensor]:
-    return reference_nlspn_author_decode(guidance, weight, bias)
+    return reference_nlspn_official_decode(guidance, weight, bias)
 
 
-def reference_dyspn_author_decode(
+def reference_dyspn_official_decode(
     guide: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor,

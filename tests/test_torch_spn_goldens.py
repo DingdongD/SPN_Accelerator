@@ -8,13 +8,13 @@ except ImportError:  # pragma: no cover - optional validation dependency
 
 if torch is not None:
     from official_spn_references import (
-        reference_completionformer_author_decode,
+        reference_completionformer_official_decode,
         reference_cspn,
         reference_dyspn,
-        reference_dyspn_author_decode,
+        reference_dyspn_official_decode,
         reference_dyspn_nlpm,
         reference_nlspn,
-        reference_nlspn_author_decode,
+        reference_nlspn_official_decode,
     )
     from spn_accel_cmodel.torch_functional import (
         AffinityMode,
@@ -44,13 +44,13 @@ def _randn(generator, shape, scale=1.0):
     return torch.randn(shape, generator=generator, dtype=torch.float32) * scale
 
 
-def _fill_author_conv(model, generator):
+def _fill_official_frontend_conv(model, generator):
     with torch.no_grad():
-        model.author.conv_offset_aff.weight.copy_(
-            _randn(generator, model.author.conv_offset_aff.weight.shape, 0.08)
+        model.official_frontend.conv_offset_aff.weight.copy_(
+            _randn(generator, model.official_frontend.conv_offset_aff.weight.shape, 0.08)
         )
-        model.author.conv_offset_aff.bias.copy_(
-            _randn(generator, model.author.conv_offset_aff.bias.shape, 0.05)
+        model.official_frontend.conv_offset_aff.bias.copy_(
+            _randn(generator, model.official_frontend.conv_offset_aff.bias.shape, 0.05)
         )
 
 
@@ -88,7 +88,7 @@ class TorchSPNSamplingTest(unittest.TestCase):
         torch.testing.assert_close(zero[0, 0, 0, 0, 0], torch.tensor(0.25))
         torch.testing.assert_close(border[0, 0, 0, 0, 0], torch.tensor(1.0))
 
-    def test_named_profiles_capture_author_defaults(self):
+    def test_named_profiles_capture_official_defaults(self):
         nlspn = SPNConfig.nlspn()
         self.assertEqual(nlspn.offset_mode, OffsetMode.RESIDUAL_YX)
         self.assertEqual(nlspn.anchor_mode, AnchorMode.CURRENT)
@@ -111,8 +111,8 @@ class TorchSPNSamplingTest(unittest.TestCase):
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
-class CSPNAuthorGoldenTest(unittest.TestCase):
-    def test_raw_author_interface_matches_release_formula_with_and_without_mask(self):
+class CSPNOfficialFrontendGoldenTest(unittest.TestCase):
+    def test_raw_official_interface_matches_release_formula_with_and_without_mask(self):
         generator = torch.Generator().manual_seed(1207)
         initial = _randn(generator, (1, 1, 4, 5))
         guidance = _randn(generator, (1, 8, 4, 5)) + 0.2
@@ -169,7 +169,7 @@ class CSPNAuthorGoldenTest(unittest.TestCase):
         torch.testing.assert_close(actual[0, 0, 2, 2], expected, rtol=0.0, atol=1.0e-6)
 
 
-class _NLSPNFamilyAuthorGolden:
+class _NLSPNFamilyOfficialFrontendGolden:
     config_factory = None
     input_type = None
     decode_reference = None
@@ -180,7 +180,7 @@ class _NLSPNFamilyAuthorGolden:
     def _cases(self):
         return ((NormalizationMode.TGASS, True, False, False, 3),)
 
-    def test_raw_author_interface_matches_all_declared_formula_variants(self):
+    def test_raw_official_interface_matches_all_declared_formula_variants(self):
         for index, (mode, use_confidence, legacy, preserve, iterations) in enumerate(
             self._cases()
         ):
@@ -200,7 +200,7 @@ class _NLSPNFamilyAuthorGolden:
                     preserve_input=preserve,
                 )
                 model = UnifiedSPN(config)
-                _fill_author_conv(model, generator)
+                _fill_official_frontend_conv(model, generator)
                 initial = _randn(generator, (1, 1, 5, 6))
                 guidance = _randn(generator, (1, 8, 5, 6))
                 confidence = torch.sigmoid(_randn(generator, (1, 1, 5, 6)))
@@ -208,8 +208,8 @@ class _NLSPNFamilyAuthorGolden:
                 sparse[:, :, 2, 3] = 4.0
                 expected_decoded = self.decode_reference(
                     guidance,
-                    model.author.conv_offset_aff.weight,
-                    model.author.conv_offset_aff.bias,
+                    model.official_frontend.conv_offset_aff.weight,
+                    model.official_frontend.conv_offset_aff.bias,
                 )
                 expected, expected_steps, expected_affinity, expected_center, metadata = (
                     reference_nlspn(
@@ -235,7 +235,7 @@ class _NLSPNFamilyAuthorGolden:
                 else:
                     inputs = self.input_type(initial, guidance, confidence, sparse)
 
-                decoded = model.author.decode(inputs)
+                decoded = model.official_frontend.decode(inputs)
                 torch.testing.assert_close(
                     decoded.raw_affinity,
                     expected_decoded["raw_affinity"],
@@ -265,10 +265,10 @@ class _NLSPNFamilyAuthorGolden:
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
-class NLSPNAuthorGoldenTest(_NLSPNFamilyAuthorGolden, unittest.TestCase):
+class NLSPNOfficialFrontendGoldenTest(_NLSPNFamilyOfficialFrontendGolden, unittest.TestCase):
     config_factory = SPNConfig.nlspn
     input_type = NLSPNRawInputs
-    decode_reference = staticmethod(reference_nlspn_author_decode)
+    decode_reference = staticmethod(reference_nlspn_official_decode)
     temperature = 1.0
     compiler = staticmethod(compile_nlspn_plan)
 
@@ -282,13 +282,13 @@ class NLSPNAuthorGoldenTest(_NLSPNFamilyAuthorGolden, unittest.TestCase):
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
-class CompletionFormerAuthorGoldenTest(
-    _NLSPNFamilyAuthorGolden,
+class CompletionFormerOfficialFrontendGoldenTest(
+    _NLSPNFamilyOfficialFrontendGolden,
     unittest.TestCase,
 ):
     config_factory = SPNConfig.completionformer
     input_type = CompletionFormerRawInputs
-    decode_reference = staticmethod(reference_completionformer_author_decode)
+    decode_reference = staticmethod(reference_completionformer_official_decode)
     temperature = 100.0
     compiler = staticmethod(compile_completionformer_plan)
 
@@ -300,7 +300,7 @@ class CompletionFormerAuthorGoldenTest(
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
-class DySPNAuthorGoldenTest(unittest.TestCase):
+class DySPNOfficialFrontendGoldenTest(unittest.TestCase):
     def test_all_released_stencils_match_decode_metadata_and_propagation(self):
         for neighbors in (1, 3, 5, 9):
             with self.subTest(neighbors=neighbors):
@@ -311,16 +311,16 @@ class DySPNAuthorGoldenTest(unittest.TestCase):
                     num_neighbors=neighbors,
                 )
                 model = UnifiedSPN(config)
-                _fill_author_conv(model, generator)
+                _fill_official_frontend_conv(model, generator)
                 initial = _randn(generator, (1, 1, 4, 6))
                 guide = _randn(generator, (1, iterations * neighbors, 4, 6))
                 sparse = torch.zeros_like(initial)
                 sparse[:, :, 2, 4] = 8.0
                 confidence_logits = _randn(generator, (1, 1, 4, 6))
-                expected_decoded = reference_dyspn_author_decode(
+                expected_decoded = reference_dyspn_official_decode(
                     guide,
-                    model.author.conv_offset_aff.weight,
-                    model.author.conv_offset_aff.bias,
+                    model.official_frontend.conv_offset_aff.weight,
+                    model.official_frontend.conv_offset_aff.bias,
                     iterations=iterations,
                     num_neighbors=neighbors,
                 )
@@ -339,7 +339,7 @@ class DySPNAuthorGoldenTest(unittest.TestCase):
                     sparse,
                     confidence_logits,
                 )
-                decoded = model.author.decode(inputs)
+                decoded = model.official_frontend.decode(inputs)
                 torch.testing.assert_close(
                     decoded.raw_affinity,
                     expected_decoded["raw_affinity"],
@@ -367,7 +367,7 @@ class DySPNAuthorGoldenTest(unittest.TestCase):
                         metadata["post_fusion_gate"],
                     )
 
-    def test_k9_preserves_author_sequential_fp32_reduction_order(self):
+    def test_k9_preserves_official_sequential_fp32_reduction_order(self):
         values = torch.tensor(
             [8.0, 1.0e7, -1.0e8, -1.0e7, 1.0e8, 4.0, 1.0e7, -2.0, -2.0],
             dtype=torch.float32,
@@ -392,8 +392,8 @@ class DySPNAuthorGoldenTest(unittest.TestCase):
 
 
 @unittest.skipIf(torch is None, "torch optional validation dependency is unavailable")
-class DySPNNLPMAuthorGoldenTest(unittest.TestCase):
-    def test_raw_author_interface_matches_release_formula_each_iteration(self):
+class DySPNNLPMOfficialFrontendGoldenTest(unittest.TestCase):
+    def test_raw_official_interface_matches_release_formula_each_iteration(self):
         generator = torch.Generator().manual_seed(555)
         initial = _randn(generator, (1, 1, 7, 8))
         guidance = _randn(generator, (1, 48, 7, 8), scale=0.15)
@@ -418,7 +418,7 @@ class DySPNNLPMAuthorGoldenTest(unittest.TestCase):
             sparse,
             confidence,
         )
-        decoded = model.author.decode(inputs)
+        decoded = model.official_frontend.decode(inputs)
         torch.testing.assert_close(decoded.raw_affinity, guidance)
         torch.testing.assert_close(decoded.attention_logits, attention_logits)
         torch.testing.assert_close(decoded.confidence_probability, confidence)
@@ -458,7 +458,7 @@ class DySPNNLPMAuthorGoldenTest(unittest.TestCase):
 
 @unittest.skipUnless(torch is not None and torch.cuda.is_available(), "CUDA unavailable")
 class TorchSPNDeviceTest(unittest.TestCase):
-    def test_all_author_profiles_accept_cpu_metadata_with_cuda_state(self):
+    def test_all_official_profiles_accept_cpu_metadata_with_cuda_state(self):
         state = torch.ones((1, 1, 3, 4), device="cuda")
         zeros = torch.zeros((1, 1, 3, 4))
         cases = (

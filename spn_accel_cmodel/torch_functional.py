@@ -1,8 +1,8 @@
 """Public Torch API for canonical FP32 SPN propagation.
 
 Prediction heads remain outside this boundary. Named model profiles compile
-author-specific metadata into one :class:`CanonicalSPNPlan`; every profile then
-executes the same :func:`propagate_canonical` recurrence.
+official implementation metadata into one :class:`CanonicalSPNPlan`; every
+profile then executes the same :func:`propagate_canonical` recurrence.
 """
 
 from __future__ import annotations
@@ -10,13 +10,13 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from .torch_spn_author import (
-    AUTHOR_BUILDERS,
-    CSPNAuthor,
-    CompletionFormerAuthor,
-    DySPNNLPMAuthor,
-    DySPNAuthor,
-    NLSPNAuthor,
+from .torch_spn_official_frontend import (
+    OFFICIAL_FRONTEND_BUILDERS,
+    CSPNOfficialFrontend,
+    CompletionFormerOfficialFrontend,
+    DySPNNLPMOfficialFrontend,
+    DySPNOfficialFrontend,
+    NLSPNOfficialFrontend,
 )
 from .torch_spn_adapters import (
     compile_completionformer_plan,
@@ -62,7 +62,7 @@ _PLAN_COMPILERS = {
     SPNProfile.DYSPN_NLPM: compile_dyspn_nlpm_plan,
 }
 
-AuthorInputs = (
+OfficialInputs = (
     CSPNRawInputs
     | NLSPNRawInputs
     | CompletionFormerRawInputs
@@ -77,15 +77,15 @@ class UnifiedSPN(nn.Module):
     def __init__(self, config: SPNConfig):
         super().__init__()
         self.config = config
-        self.author = AUTHOR_BUILDERS[config.profile](config)
+        self.official_frontend = OFFICIAL_FRONTEND_BUILDERS[config.profile](config)
 
     def forward(
         self,
-        inputs: AuthorInputs,
+        inputs: OfficialInputs,
         *,
         return_trace: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, SPNTrace]:
-        decoded = self.author.decode(inputs)
+        decoded = self.official_frontend.decode(inputs)
         compiler = _PLAN_COMPILERS[self.config.profile]
         plan = compiler(self.config, decoded)
         return propagate_canonical(
@@ -101,19 +101,19 @@ __all__ = [
     "AffinityMode",
     "AnchorMode",
     "CSPNRawInputs",
-    "CSPNAuthor",
+    "CSPNOfficialFrontend",
     "CanonicalSPNPlan",
     "CompletionFormerRawInputs",
-    "CompletionFormerAuthor",
+    "CompletionFormerOfficialFrontend",
     "DySPNNLPMRawInputs",
-    "DySPNNLPMAuthor",
+    "DySPNNLPMOfficialFrontend",
     "DySPNRawInputs",
-    "DySPNAuthor",
+    "DySPNOfficialFrontend",
     "NeighborConfidenceMode",
     "NeighborMode",
     "NormalizationMode",
     "NLSPNRawInputs",
-    "NLSPNAuthor",
+    "NLSPNOfficialFrontend",
     "OffsetMode",
     "PaddingMode",
     "ReductionMode",

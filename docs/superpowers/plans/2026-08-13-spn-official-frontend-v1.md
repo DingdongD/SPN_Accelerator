@@ -1,8 +1,8 @@
-# SPN AuthorAdapter v1 Implementation Plan
+# SPN OfficialFrontend v1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace the overloaded post-decoder `SPNInputs` facade with five author-level PyTorch interfaces that decode official SPN parameters and execute the existing single canonical propagation recurrence.
+**Goal:** Replace the overloaded post-decoder `SPNInputs` facade with five official-frontend PyTorch interfaces that decode official SPN parameters and execute the existing single canonical propagation recurrence.
 
 **Architecture:** Profile-specific `nn.Module` frontends own only the official plan-producing parameters (`conv_offset_aff` and, for the NLSPN family, `aff_scale_const`). They emit one internal `DecodedSPNParameters` contract; metadata-only adapters compile that contract to `CanonicalSPNPlan`; `propagate_canonical()` remains the sole evolving-state loop. The implementation is an FP32 propagation reference only and contains no DCNv2 dependency, prediction backbone, checkpoint download, non-FP32 path, or accelerator modeling.
 
@@ -14,17 +14,17 @@
 
 - Modify `spn_accel_cmodel/torch_spn_types.py`: add five public RawInputs, remove `SPNInputs` and the `GENERIC` profile at cutover.
 - Create `spn_accel_cmodel/torch_spn_decoded.py`: one internal decoded-parameter dataclass.
-- Create `spn_accel_cmodel/torch_spn_author.py`: five author frontends and strict explicit-prefix parameter loading.
+- Create `spn_accel_cmodel/torch_spn_official_frontend.py`: five official frontends and strict explicit-prefix parameter loading.
 - Modify `spn_accel_cmodel/torch_spn_adapters.py`: consume decoded parameters, honor loaded affinity scale, remove the generic compiler.
-- Modify `spn_accel_cmodel/torch_functional.py`: author-level `UnifiedSPN` facade.
-- Modify `spn_accel_cmodel/__init__.py`: public RawInputs and author-module exports; remove old exports.
-- Create `tests/test_torch_spn_author.py`: decoder, parameter-loading, raw-type, and no-recurrence tests.
-- Modify `tests/official_spn_references.py`: independent author-boundary convolution/decode formulas.
+- Modify `spn_accel_cmodel/torch_functional.py`: official-frontend `UnifiedSPN` facade.
+- Modify `spn_accel_cmodel/__init__.py`: public RawInputs and official-module exports; remove old exports.
+- Create `tests/test_torch_spn_official_frontend.py`: decoder, parameter-loading, raw-type, and no-recurrence tests.
+- Modify `tests/official_spn_references.py`: independent official-boundary convolution/decode formulas.
 - Modify `tests/test_torch_spn_adapters.py`: construct `DecodedSPNParameters` directly.
 - Modify `tests/test_torch_spn_core.py`: assert the new facade calls the canonical core once and old API is absent.
 - Modify `tests/test_torch_spn_goldens.py`: drive all five profiles from RawInputs and compare every iteration.
 - Modify `tests/test_recorded_trace.py`: use the decoded compiler/core boundary for already-decoded trace tensors.
-- Modify `README.md` and `validation/README.md`: document the author and canonical entry points and precise equivalence scope.
+- Modify `README.md` and `validation/README.md`: document the official and canonical entry points and precise equivalence scope.
 
 Do not stage or alter unrelated existing whitespace-only worktree changes in
 `spn_accel_cmodel/trace.py`, `spn_accel_cmodel/torch_spn_adapters.py`, or
@@ -36,15 +36,15 @@ hunk explicitly.
 **Files:**
 - Modify: `spn_accel_cmodel/torch_spn_types.py`
 - Create: `spn_accel_cmodel/torch_spn_decoded.py`
-- Test: `tests/test_torch_spn_author.py`
+- Test: `tests/test_torch_spn_official_frontend.py`
 
 - [ ] **Step 1: Write the failing public-type and decoded-contract tests**
 
-Create `tests/test_torch_spn_author.py` with optional-Torch import handling
+Create `tests/test_torch_spn_official_frontend.py` with optional-Torch import handling
 matching the other Torch suites. Add a test that constructs each exact type:
 
 ```python
-class AuthorInputTypeTest(unittest.TestCase):
+class OfficialInputTypeTest(unittest.TestCase):
     def test_profile_inputs_name_confidence_semantics_explicitly(self):
         image = torch.zeros((1, 1, 3, 4))
         self.assertEqual(
@@ -92,7 +92,7 @@ Import `CSPNRawInputs`, `NLSPNRawInputs`, `CompletionFormerRawInputs`,
 Run:
 
 ```bash
-PYTHONPATH=.:tests python -m unittest test_torch_spn_author.AuthorInputTypeTest -v
+PYTHONPATH=.:tests python -m unittest test_torch_spn_official_frontend.OfficialInputTypeTest -v
 ```
 
 Expected: import failure because the RawInputs and decoded contract do not
@@ -177,7 +177,7 @@ Do not export this internal type from `spn_accel_cmodel/__init__.py`.
 Run:
 
 ```bash
-PYTHONPATH=.:tests python -m unittest test_torch_spn_author.AuthorInputTypeTest -v
+PYTHONPATH=.:tests python -m unittest test_torch_spn_official_frontend.OfficialInputTypeTest -v
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
@@ -187,35 +187,35 @@ Expected: the new tests pass and the existing 71 tests remain green.
 
 ```bash
 git add spn_accel_cmodel/torch_spn_types.py \
-  spn_accel_cmodel/torch_spn_decoded.py tests/test_torch_spn_author.py
-git commit -m "refactor: define author-level SPN input contracts"
+  spn_accel_cmodel/torch_spn_decoded.py tests/test_torch_spn_official_frontend.py
+git commit -m "refactor: define official-frontend SPN input contracts"
 ```
 
 ### Task 2: Implement NLSPN-family parameter decoders
 
 **Files:**
-- Create: `spn_accel_cmodel/torch_spn_author.py`
-- Modify: `tests/test_torch_spn_author.py`
+- Create: `spn_accel_cmodel/torch_spn_official_frontend.py`
+- Modify: `tests/test_torch_spn_official_frontend.py`
 
 - [ ] **Step 1: Write failing decoder-equivalence tests**
 
-For both `NLSPNAuthor` and `CompletionFormerAuthor`, use a fixed generator,
+For both `NLSPNOfficialFrontend` and `CompletionFormerOfficialFrontend`, use a fixed generator,
 assign random FP32 `conv_offset_aff.weight`, `conv_offset_aff.bias`, and
 `aff_scale_const`, and calculate the independent result with `F.conv2d`:
 
 ```python
 raw = F.conv2d(
     guidance,
-    author.conv_offset_aff.weight,
-    author.conv_offset_aff.bias,
+    official.conv_offset_aff.weight,
+    official.conv_offset_aff.bias,
     padding=1,
 )
 o1, o2, expected_affinity = torch.chunk(raw, 3, dim=1)
 expected_offsets = torch.cat((o1, o2), dim=1).view(b, 8, 2, h, w)
-decoded = author.decode(inputs)
+decoded = official.decode(inputs)
 torch.testing.assert_close(decoded.raw_affinity, expected_affinity)
 torch.testing.assert_close(decoded.residual_offsets_yx, expected_offsets)
-torch.testing.assert_close(decoded.affinity_scale, author.aff_scale_const)
+torch.testing.assert_close(decoded.affinity_scale, official.aff_scale_const)
 ```
 
 Also assert exact layer shapes `(24,8,3,3)` and `(24,)`, zero
@@ -231,9 +231,9 @@ state = {
     "module.prop_layer.conv_offset_aff.bias": bias,
     "module.prop_layer.aff_scale_const": scale,
 }
-author.load_official_parameters(state, prefix="module.prop_layer.")
-torch.testing.assert_close(author.conv_offset_aff.weight, weight)
-torch.testing.assert_close(author.aff_scale_const, scale)
+official.load_official_parameters(state, prefix="module.prop_layer.")
+torch.testing.assert_close(official.conv_offset_aff.weight, weight)
+torch.testing.assert_close(official.aff_scale_const, scale)
 ```
 
 Add separate assertions that a missing exact key and a wrong-shaped exact key
@@ -243,22 +243,22 @@ raise `ValueError` naming that key. Do not test aliases or fallback prefixes.
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author.NLSPNAuthorDecoderTest \
-  test_torch_spn_author.CompletionFormerAuthorDecoderTest -v
+  test_torch_spn_official_frontend.NLSPNOfficialFrontendDecoderTest \
+  test_torch_spn_official_frontend.CompletionFormerOfficialFrontendDecoderTest -v
 ```
 
-Expected: missing `torch_spn_author` or missing author classes.
+Expected: missing `torch_spn_official_frontend` or missing official classes.
 
 - [ ] **Step 4: Implement the shared NLSPN-family base**
 
-Create `torch_spn_author.py`. Implement a private `_NLSPNFamilyAuthor` that:
+Create `torch_spn_official_frontend.py`. Implement a private `_NLSPNFamilyOfficialFrontend` that:
 
 - accepts `SPNConfig` and one exact RawInputs type;
 - creates `conv_offset_aff` with official name, dimensions, padding, and zero
   initialization;
 - creates `aff_scale_const` as a scalar `nn.Parameter`, initialized to K for
   TC, `affinity_gamma*K` for TGASS, and one for AS/ASS;
-- makes the parameter trainable only for TGASS, matching the author module;
+- makes the parameter trainable only for TGASS, matching the official module;
 - implements `decode()` using the exact `chunk -> cat -> view` order;
 - returns `DecodedSPNParameters` without normalizing affinity or sampling
   evolving depth;
@@ -277,7 +277,7 @@ names = (
 For every name, form `prefix + name`, require the key, require exact shape, and
 copy under `torch.no_grad()`. Do not search or strip prefixes automatically.
 
-- [ ] **Step 5: Add `NLSPNAuthor` and `CompletionFormerAuthor`**
+- [ ] **Step 5: Add `NLSPNOfficialFrontend` and `CompletionFormerOfficialFrontend`**
 
 Subclasses specify their exact input type and map fields as follows:
 
@@ -293,7 +293,7 @@ CompletionFormer:
   sparse_depth <- sparse_depth
 ```
 
-`rgb` is accepted at the author interface but not included in decoded
+`rgb` is accepted at the official interface but not included in decoded
 parameters because the fixed upstream propagation modules do not consume it in
 their parameter formulas.
 
@@ -301,8 +301,8 @@ their parameter formulas.
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author.NLSPNAuthorDecoderTest \
-  test_torch_spn_author.CompletionFormerAuthorDecoderTest -v
+  test_torch_spn_official_frontend.NLSPNOfficialFrontendDecoderTest \
+  test_torch_spn_official_frontend.CompletionFormerOfficialFrontendDecoderTest -v
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
@@ -311,15 +311,15 @@ Expected: decoder/loading tests pass and the existing suite remains green.
 - [ ] **Step 7: Commit NLSPN-family decoders**
 
 ```bash
-git add spn_accel_cmodel/torch_spn_author.py tests/test_torch_spn_author.py
-git commit -m "feat: decode NLSPN author parameters"
+git add spn_accel_cmodel/torch_spn_official_frontend.py tests/test_torch_spn_official_frontend.py
+git commit -m "feat: decode NLSPN official parameters"
 ```
 
 ### Task 3: Implement current DySPN parameter decoding
 
 **Files:**
-- Modify: `spn_accel_cmodel/torch_spn_author.py`
-- Modify: `tests/test_torch_spn_author.py`
+- Modify: `spn_accel_cmodel/torch_spn_official_frontend.py`
+- Modify: `tests/test_torch_spn_official_frontend.py`
 
 - [ ] **Step 1: Write failing K=1/3/5/9 decoder tests**
 
@@ -329,14 +329,14 @@ compute:
 ```python
 raw = F.conv2d(
     guide,
-    author.conv_offset_aff.weight,
-    author.conv_offset_aff.bias,
+    official.conv_offset_aff.weight,
+    official.conv_offset_aff.bias,
     padding=1,
 )
 offset_flat, affinity_flat = torch.split(raw, [2 * t * k, t * k], dim=1)
 expected_offsets = offset_flat.view(b, t, k, 2, h, w)
 expected_logits = affinity_flat.view(b, t, k, h, w)
-decoded = author.decode(inputs)
+decoded = official.decode(inputs)
 ```
 
 Compare both tensors exactly, assert layer shape
@@ -353,12 +353,12 @@ Use prefix `module.dyspn_2_5.` and require only
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author.DySPNAuthorDecoderTest -v
+  test_torch_spn_official_frontend.DySPNOfficialFrontendDecoderTest -v
 ```
 
-Expected: missing `DySPNAuthor` behavior.
+Expected: missing `DySPNOfficialFrontend` behavior.
 
-- [ ] **Step 4: Implement `DySPNAuthor`**
+- [ ] **Step 4: Implement `DySPNOfficialFrontend`**
 
 Create the official-shaped zero-initialized convolution using
 `channels=config.iterations*config.num_neighbors`. Decode with exact
@@ -371,7 +371,7 @@ propagation in this class.
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author.DySPNAuthorDecoderTest -v
+  test_torch_spn_official_frontend.DySPNOfficialFrontendDecoderTest -v
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
@@ -380,19 +380,19 @@ Expected: all pass.
 - [ ] **Step 6: Commit the DySPN decoder**
 
 ```bash
-git add spn_accel_cmodel/torch_spn_author.py tests/test_torch_spn_author.py
-git commit -m "feat: decode DySPN author parameters"
+git add spn_accel_cmodel/torch_spn_official_frontend.py tests/test_torch_spn_official_frontend.py
+git commit -m "feat: decode DySPN official parameters"
 ```
 
-### Task 4: Implement CSPN and NLPM author interfaces
+### Task 4: Implement CSPN and NLPM official interfaces
 
 **Files:**
-- Modify: `spn_accel_cmodel/torch_spn_author.py`
-- Modify: `tests/test_torch_spn_author.py`
+- Modify: `spn_accel_cmodel/torch_spn_official_frontend.py`
+- Modify: `tests/test_torch_spn_official_frontend.py`
 
-- [ ] **Step 1: Write failing CSPN author mapping test**
+- [ ] **Step 1: Write failing CSPN official mapping test**
 
-Assert `CSPNAuthor.decode(CSPNRawInputs(...))` maps blur depth to current and
+Assert `CSPNOfficialFrontend.decode(CSPNRawInputs(...))` maps blur depth to current and
 initial, guidance to raw affinity, sparse depth to sparse depth, and produces no
 offset, attention, confidence, or affinity-scale tensors.
 
@@ -406,11 +406,11 @@ expected = dynamic_logits.view(b, t, 4, h, w)
 ```
 
 Assert guidance remains `[B,48,H,W]`, confidence probability is unchanged, and
-no sigmoid is applied in the author module.
+no sigmoid is applied in the official module.
 
 - [ ] **Step 3: Write failing input-type and shape error tests**
 
-For every author class, pass another profile's RawInputs and expect `TypeError`
+For every official class, pass another profile's RawInputs and expect `TypeError`
 naming both configured profile and expected type. Add field-named `ValueError`
 tests for CSPN guidance channels, NLPM 48 guidance channels, and NLPM `4*T`
 dynamic channels.
@@ -419,81 +419,81 @@ dynamic channels.
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author.CSPNAuthorDecoderTest \
-  test_torch_spn_author.DySPNNLPMAuthorDecoderTest \
-  test_torch_spn_author.AuthorInputValidationTest -v
+  test_torch_spn_official_frontend.CSPNOfficialFrontendDecoderTest \
+  test_torch_spn_official_frontend.DySPNNLPMOfficialFrontendDecoderTest \
+  test_torch_spn_official_frontend.OfficialInputValidationTest -v
 ```
 
-Expected: missing CSPN/NLPM author classes or validation.
+Expected: missing CSPN/NLPM official classes or validation.
 
-- [ ] **Step 5: Implement the two parameter-free author classes**
+- [ ] **Step 5: Implement the two parameter-free official classes**
 
 Both are `nn.Module` classes with `decode()` but no learned parameters.
 Canonicalize state-like tensors to FP32 on the initial state's device. Require
-exact author channel and spatial shapes. NLPM reshapes dynamic logits but does
+exact official channel and spatial shapes. NLPM reshapes dynamic logits but does
 not apply sigmoid or group normalization.
 
-- [ ] **Step 6: Add the exact author builder table**
+- [ ] **Step 6: Add the exact official builder table**
 
-In `torch_spn_author.py` define:
+In `torch_spn_official_frontend.py` define:
 
 ```python
-AUTHOR_BUILDERS = {
-    SPNProfile.CSPN: CSPNAuthor,
-    SPNProfile.NLSPN: NLSPNAuthor,
-    SPNProfile.COMPLETIONFORMER: CompletionFormerAuthor,
-    SPNProfile.DYSPN: DySPNAuthor,
-    SPNProfile.DYSPN_NLPM: DySPNNLPMAuthor,
+OFFICIAL_FRONTEND_BUILDERS = {
+    SPNProfile.CSPN: CSPNOfficialFrontend,
+    SPNProfile.NLSPN: NLSPNOfficialFrontend,
+    SPNProfile.COMPLETIONFORMER: CompletionFormerOfficialFrontend,
+    SPNProfile.DYSPN: DySPNOfficialFrontend,
+    SPNProfile.DYSPN_NLPM: DySPNNLPMOfficialFrontend,
 }
 ```
 
-Do not add a default lookup, generic author, or unknown-profile fallback.
+Do not add a default lookup, generic official, or unknown-profile fallback.
 
-- [ ] **Step 7: Run all author tests and existing suite**
+- [ ] **Step 7: Run all official tests and existing suite**
 
 ```bash
-PYTHONPATH=.:tests python -m unittest test_torch_spn_author -v
+PYTHONPATH=.:tests python -m unittest test_torch_spn_official_frontend -v
 PYTHONPATH=. python -m unittest discover -s tests -v
 ```
 
-Expected: all author tests and the existing suite pass.
+Expected: all official tests and the existing suite pass.
 
-- [ ] **Step 8: Commit parameter-free author interfaces**
+- [ ] **Step 8: Commit parameter-free official interfaces**
 
 ```bash
-git add spn_accel_cmodel/torch_spn_author.py tests/test_torch_spn_author.py
-git commit -m "feat: add CSPN and NLPM author interfaces"
+git add spn_accel_cmodel/torch_spn_official_frontend.py tests/test_torch_spn_official_frontend.py
+git commit -m "feat: add CSPN and NLPM official interfaces"
 ```
 
-### Task 5: Add independent author-boundary formulas
+### Task 5: Add independent official-boundary formulas
 
 **Files:**
 - Modify: `tests/official_spn_references.py`
-- Modify: `tests/test_torch_spn_author.py`
+- Modify: `tests/test_torch_spn_official_frontend.py`
 
 - [ ] **Step 1: Write failing raw-decoder oracle tests**
 
-Add tests that import `reference_nlspn_author_decode`,
-`reference_completionformer_author_decode`, and
-`reference_dyspn_author_decode`. Compare their outputs with each production
-author decoder using fixed random weights and biases. The production decoder
+Add tests that import `reference_nlspn_official_decode`,
+`reference_completionformer_official_decode`, and
+`reference_dyspn_official_decode`. Compare their outputs with each production
+official decoder using fixed random weights and biases. The production decoder
 test must not pass its decoded tensors into the oracle.
 
 - [ ] **Step 2: Run and verify RED**
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author.IndependentAuthorDecodeTest -v
+  test_torch_spn_official_frontend.IndependentOfficialDecodeTest -v
 ```
 
-Expected: missing author decode reference functions.
+Expected: missing official decode reference functions.
 
 - [ ] **Step 3: Implement independent `F.conv2d` decoder formulas**
 
 In `official_spn_references.py`, add standalone functions that accept raw
 profile tensors plus explicit weight/bias tensors and return dictionaries with
 `conv_output`, `residual_offsets_yx`, and `raw_affinity`. Use only `F.conv2d`,
-`torch.chunk`/`torch.split`, and direct `view`; do not import production author,
+`torch.chunk`/`torch.split`, and direct `view`; do not import production official,
 adapter, decoded, or core modules.
 
 For NLSPN and CompletionFormer use:
@@ -506,10 +506,10 @@ offsets = torch.cat((o1, o2), dim=1).view(b, k, 2, h, w)
 
 For DySPN use the exact `2*T*K`/`T*K` split and views.
 
-- [ ] **Step 4: Run oracle and author tests**
+- [ ] **Step 4: Run oracle and official tests**
 
 ```bash
-PYTHONPATH=.:tests python -m unittest test_torch_spn_author -v
+PYTHONPATH=.:tests python -m unittest test_torch_spn_official_frontend -v
 ```
 
 Expected: all pass.
@@ -520,11 +520,11 @@ Stage only intended hunks from the already-modified reference file:
 
 ```bash
 git add -p tests/official_spn_references.py
-git add tests/test_torch_spn_author.py
-git commit -m "test: add independent SPN author decoder formulas"
+git add tests/test_torch_spn_official_frontend.py
+git commit -m "test: add independent SPN official decoder formulas"
 ```
 
-### Task 6: Atomically cut adapters and facade over to AuthorAdapter v1
+### Task 6: Atomically cut adapters and facade over to OfficialFrontend v1
 
 **Files:**
 - Modify: `spn_accel_cmodel/torch_spn_types.py`
@@ -613,7 +613,7 @@ Add an explicit loaded-scale test where config gamma and
 `decoded.affinity_scale` differ, proving the compiler uses the decoded
 checkpoint parameter.
 
-- [ ] **Step 5: Replace `UnifiedSPN` with the strict author facade**
+- [ ] **Step 5: Replace `UnifiedSPN` with the strict official facade**
 
 Implement:
 
@@ -622,10 +622,10 @@ class UnifiedSPN(nn.Module):
     def __init__(self, config: SPNConfig):
         super().__init__()
         self.config = config
-        self.author = AUTHOR_BUILDERS[config.profile](config)
+        self.official_frontend = OFFICIAL_FRONTEND_BUILDERS[config.profile](config)
 
     def forward(self, inputs, *, return_trace=False):
-        decoded = self.author.decode(inputs)
+        decoded = self.official_frontend.decode(inputs)
         plan = _PLAN_COMPILERS[self.config.profile](self.config, decoded)
         return propagate_canonical(
             decoded.current,
@@ -645,7 +645,7 @@ exports, and any generic configuration tests. Move `profile` before optional
 dataclass fields so `SPNConfig` requires an explicit profile; all supported
 construction goes through the five named class methods.
 
-Export all five RawInputs and five author classes through `torch_functional.py`
+Export all five RawInputs and five official classes through `torch_functional.py`
 and lazy package exports. Keep `CanonicalSPNPlan`, `SPNConfig`, `SPNTrace`, and
 `propagate_canonical` public. Do not export `DecodedSPNParameters` at package
 top level.
@@ -654,35 +654,35 @@ top level.
 
 `test_recorded_trace.py` already owns decoded NLSPN offsets/affinity. Construct
 `DecodedSPNParameters`, call `compile_nlspn_plan`, then call
-`propagate_canonical`; do not synthesize guidance or use an author frontend for
+`propagate_canonical`; do not synthesize guidance or use an official frontend for
 post-decoder data.
 
 Keep sampling-only tests pointed at `sample_neighbors`. Replace any generic
 facade test with direct `CanonicalSPNPlan` core coverage.
 
-- [ ] **Step 8: Migrate existing goldens to author RawInputs**
+- [ ] **Step 8: Migrate existing goldens to official RawInputs**
 
 For CSPN and NLPM, rename arguments directly into their RawInputs.
 
 For every existing post-decoder NLSPN/CompletionFormer/DySPN test, either:
 
 - move it to adapter-level coverage by constructing `DecodedSPNParameters`, or
-- create a deterministic 1x1/3x3 author convolution whose output is part of the
-  test and compare against the independent author oracle.
+- create a deterministic 1x1/3x3 official convolution whose output is part of the
+  test and compare against the independent official oracle.
 
 End-to-end `UnifiedSPN` golden cases must begin from guidance/guide tensors and
-set the author's fixed random weights; they may not inject precomputed offsets
+set the official's fixed random weights; they may not inject precomputed offsets
 or affinities.
 
 - [ ] **Step 9: Run the atomic cutover suites**
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author test_torch_spn_adapters test_torch_spn_core \
+  test_torch_spn_official_frontend test_torch_spn_adapters test_torch_spn_core \
   test_torch_spn_goldens test_recorded_trace -v
 ```
 
-Expected: all migrated author, adapter, core, golden, and trace tests pass.
+Expected: all migrated official, adapter, core, golden, and trace tests pass.
 
 - [ ] **Step 10: Audit forbidden compatibility paths**
 
@@ -707,19 +707,19 @@ git add spn_accel_cmodel/torch_spn_types.py \
   tests/test_torch_spn_adapters.py tests/test_torch_spn_core.py \
   tests/test_torch_spn_goldens.py tests/test_recorded_trace.py
 git add -p spn_accel_cmodel/torch_spn_adapters.py
-git commit -m "refactor: expose author-level unified SPN propagation"
+git commit -m "refactor: expose official-frontend unified SPN propagation"
 ```
 
-### Task 7: Prove full author-boundary equivalence
+### Task 7: Prove full official-boundary equivalence
 
 **Files:**
 - Modify: `tests/official_spn_references.py`
 - Modify: `tests/test_torch_spn_goldens.py`
-- Modify: `tests/test_torch_spn_author.py`
+- Modify: `tests/test_torch_spn_official_frontend.py`
 
-- [ ] **Step 1: Add failing end-to-end author formula tests**
+- [ ] **Step 1: Add failing end-to-end official formula tests**
 
-Create one fixed-seed author-boundary case for every profile and extend coverage
+Create one fixed-seed official-boundary case for every profile and extend coverage
 as follows:
 
 - CSPN: code-mask disabled/enabled and shifted-source integer microcase;
@@ -738,26 +738,26 @@ every output iteration.
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_goldens.AuthorBoundaryGoldenTest -v
+  test_torch_spn_goldens.OfficialBoundaryGoldenTest -v
 ```
 
-Expected: missing raw author reference functions or missing full-trace metadata.
+Expected: missing raw official reference functions or missing full-trace metadata.
 
-- [ ] **Step 3: Extend independent author formulas through propagation**
+- [ ] **Step 3: Extend independent official formulas through propagation**
 
 Compose the new independent decoder formulas with the existing independent
-author propagation formulas inside `official_spn_references.py`. Pass explicit
+official propagation formulas inside `official_spn_references.py`. Pass explicit
 weight, bias, and affinity-scale tensors. Do not import production modules or
 reuse `CanonicalSPNPlan`.
 
 Return both decoder metadata and one list per propagation iteration so tests
 can compare the complete boundary, not only final output.
 
-- [ ] **Step 4: Run all author and golden tests**
+- [ ] **Step 4: Run all official and golden tests**
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author test_torch_spn_goldens -v
+  test_torch_spn_official_frontend test_torch_spn_goldens -v
 ```
 
 Expected: all pass using `rtol=1e-5, atol=1e-6` for normalized/bilinear paths
@@ -779,12 +779,12 @@ PYTHONPATH=.:tests python -m unittest \
 
 Expected in the current environment: CUDA case runs and passes, not skips.
 
-- [ ] **Step 6: Commit complete author equivalence**
+- [ ] **Step 6: Commit complete official equivalence**
 
 ```bash
 git add -p tests/official_spn_references.py
-git add tests/test_torch_spn_goldens.py tests/test_torch_spn_author.py
-git commit -m "test: prove author-level SPN equivalence"
+git add tests/test_torch_spn_goldens.py tests/test_torch_spn_official_frontend.py
+git commit -m "test: prove official-frontend SPN equivalence"
 ```
 
 ### Task 8: Document, audit, review, and verify
@@ -796,7 +796,7 @@ git commit -m "test: prove author-level SPN equivalence"
 
 - [ ] **Step 1: Replace README usage with RawInputs**
 
-Document the author-level path:
+Document the official-frontend path:
 
 ```python
 model = UnifiedSPN(SPNConfig.completionformer(iterations=6))
@@ -842,11 +842,11 @@ the searched markers and this propagation task.
 
 ```bash
 PYTHONPATH=.:tests python -m unittest \
-  test_torch_spn_author test_torch_spn_core \
+  test_torch_spn_official_frontend test_torch_spn_core \
   test_torch_spn_adapters test_torch_spn_goldens -v
 ```
 
-Expected: all decoder, structural, adapter, and independent author-formula
+Expected: all decoder, structural, adapter, and independent official-formula
 tests pass.
 
 - [ ] **Step 5: Run the complete repository suite**
@@ -861,12 +861,12 @@ Expected: every repository test passes.
 
 ```bash
 git add README.md validation/README.md
-git commit -m "docs: describe author-level unified SPN reference"
+git commit -m "docs: describe official-frontend unified SPN reference"
 ```
 
 - [ ] **Step 7: Request independent review**
 
-Ask the reviewer to inspect the full AuthorAdapter range, specifically:
+Ask the reviewer to inspect the full OfficialFrontend range, specifically:
 
 - official convolution parameter names and channel order;
 - `aff_scale_const` checkpoint use;
