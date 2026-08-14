@@ -22,7 +22,7 @@ Subgraph CModel --> ACTSim / board JSON ---------- latency/traffic check
 
 | Level | Target | Implemented now | External golden required |
 |---|---|---|---|
-| L0 | SPN functional semantics | Yes: NumPy reference + PyTorch `grid_sample` unit cross-check | No |
+| L0 | SPN functional semantics | Yes: NumPy reference + unified Torch official-formula goldens | No |
 | L1a | Tensor compute cycles | Yes: SCALE-Sim v3 GEMM adapter/report parser | SCALE-Sim installation or saved report |
 | L1b | Conv traffic + cycles | Yes: SCALE-Sim Conv-tile adapter | SCALE-Sim installation |
 | L2 | SRAM banks / DMA | Yes: synthetic bank-conflict tests | Optional Ramulator2 for DRAM timing |
@@ -63,6 +63,50 @@ When PyTorch is available, `tests/test_recorded_trace.py` additionally checks:
 - 18-channel CompletionFormer offset tensors with the inserted center pair removed correctly.
 
 For quantized hardware, add the accelerator's fixed-point rounding/saturation rules as a second functional reference instead of changing this floating-point semantic golden.
+
+### Unified Torch official-code profiles
+
+The broader Torch functional model lives in
+`spn_accel_cmodel/torch_functional.py`.  Its independent test oracles live in
+`tests/official_spn_references.py` and mirror these released source paths:
+
+- XinJCheng/CSPN commit `b3e487bdcdcd8a63333656e69b3268698e543181`;
+- zzangjinsun/NLSPN_ECCV20 commit `ba33fa5d9ea62ca970026a145ab18fab76d79d4a`;
+- youmi-zym/CompletionFormer commit `2744eddee9b57595dc3064f7d342569736a6803b`;
+- Kyakaka/DySPN commit `d4871eeabc8797d821873a2a41daf359466a7255`.
+
+This validation target is strictly a PyTorch FP32 propagation reference; it is
+separate from the accelerator CModel and the FPGA/RTL validation levels below.
+The official-frontend boundary accepts each released propagation module's raw
+tensors. NLSPN, CompletionFormer, and DySPN first execute an independently
+checked `conv_offset_aff` decode, then all five profiles compile a canonical
+plan and enter the same `propagate_canonical()` state loop.
+
+Run only the Torch profile goldens:
+
+```bash
+PYTHONPATH=. python -m unittest discover \
+  -s tests -p 'test_torch_spn_goldens.py' -v
+```
+
+Run Torch plus the existing NumPy cross-check:
+
+```bash
+PYTHONPATH=. python -m unittest discover -s tests -v
+```
+
+The tests use fixed random FP32 weights and inputs; they do not download or
+require pretrained checkpoints. A locally available official state dict can be
+loaded into the official frontend using an explicit parameter prefix. Decoder
+tensors, canonical coefficients, candidates, and per-iteration outputs are
+checked independently. NLSPN and CompletionFormer confidence is represented as
+a probability, whereas current DySPN confidence is represented as logits and
+sigmoided inside the propagation plan.
+
+Agreement here is FP32 semantic agreement, not a claim of bitwise equality
+with a CUDA DCNv2 kernel.  The acceptance threshold for interpolated paths is
+`rtol=1e-5, atol=1e-6`; deterministic integer microcases use exact equality
+where the reduction order is identical.
 
 ---
 

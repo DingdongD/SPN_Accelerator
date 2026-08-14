@@ -99,6 +99,124 @@ Representative workload:
 
 The current baseline result is an **architecture-model prediction**, not a calibrated silicon claim.
 
+## Torch propagation goldens
+
+`spn_accel_cmodel.torch_functional` provides a propagation-only FP32 reference
+for the released CSPN, NLSPN, CompletionFormer, DySPN, and DySPN-NLPM
+implementations. This Torch operator is independent of the repository's FPGA,
+timing, and accelerator models. CNN/Transformer prediction backbones and DCNv2
+are outside its boundary.
+
+All five profiles execute the same recurrence. `UnifiedSPN` first applies the
+official propagation module's parameter decoder, including `conv_offset_aff`
+where the released module owns it. A metadata adapter then creates a
+`CanonicalSPNPlan`; it never advances the depth state. `propagate_canonical()`
+is the sole owner of the propagation iteration loop:
+
+```text
+official RawInputs -> official parameter decode -> CanonicalSPNPlan
+                                                    |
+decoded current + initial --------------------------+
+                                                    v
+                                      propagate_canonical()
+```
+
+The implementation is split accordingly:
+
+- `torch_spn_types.py`: public configuration, plan, and trace types;
+- `torch_spn_official_frontend.py`: official propagation-module parameter decoders;
+- `torch_spn_decoded.py`: internal post-decoder tensor contract;
+- `torch_spn_adapters.py`: CSPN/NLSPN/CompletionFormer/DySPN/NLPM metadata
+  compilers;
+- `torch_spn_core.py`: sampling, reduction, sparse fusion, and the one canonical
+  recurrence;
+- `torch_functional.py`: stable public exports and the `UnifiedSPN` wrapper.
+
+Canonical profiles preserve the official-code distinctions rather than treating
+all SPNs as an eight-neighbor absolute-sum kernel:
+
+| Profile | Propagation semantics |
+|---|---|
+| `SPNConfig.cspn()` | shifted 3x3 integer stencil, initial anchor, zero padding, optional code-exact post mask |
+| `SPNConfig.nlspn()` | deformable eight-neighbor sampling, AS/ASS/TC/TGASS, current anchor, sampled confidence |
+| `SPNConfig.completionformer()` | NLSPN fork with `tanh(raw / 100)` and six-step default |
+| `SPNConfig.dyspn()` | per-iteration offsets/logits, K=1/3/5/9 including center, softmax, sparse-confidence post fusion |
+| `SPNConfig.dyspn_nlpm()` | 3x3/5x5/7x7 grouped nonlinear propagation with per-step dynamic logits |
+
+Example:
+
+```python
+from spn_accel_cmodel import (
+    CompletionFormerRawInputs,
+    SPNConfig,
+    UnifiedSPN,
+)
+
+model = UnifiedSPN(SPNConfig.completionformer(iterations=6))
+output, trace = model(
+    CompletionFormerRawInputs(
+        pred_init=pred_init,                    # [B,1,H,W]
+        guidance=guidance,                      # [B,8,H,W]
+        confidence_probability=confidence,      # [B,1,H,W]
+        sparse_depth=sparse_depth,
+    ),
+    return_trace=True,
+)
+```
+
+`model.official_frontend` owns the same `conv_offset_aff` and `aff_scale_const` parameter
+names as the official propagation module. Parameters can therefore be copied
+from a checkpoint already present locally with an explicit prefix:
+
+```python
+model.official_frontend.load_official_parameters(
+    local_state_dict,
+    prefix="module.prop_layer.",
+)
+```
+
+No checkpoint is required to validate propagation mathematics; the unit tests
+use fixed random FP32 parameters and identical random inputs on both sides.
+
+Callers that already own decoded coefficients can use the lower boundary
+directly:
+
+```python
+from spn_accel_cmodel import compile_nlspn_plan, propagate_canonical
+from spn_accel_cmodel.torch_spn_decoded import DecodedSPNParameters
+
+decoded = DecodedSPNParameters(
+    current=current,
+    initial=initial,
+    raw_affinity=raw_affinity,
+    residual_offsets_yx=residual_offsets_yx,
+    confidence_probability=confidence,
+    affinity_scale=affinity_scale,
+)
+plan = compile_nlspn_plan(config, decoded)
+output, trace = propagate_canonical(current, initial, plan, return_trace=True)
+```
+
+Run the independent official-formula differential suite:
+
+```bash
+python -m pip install -e '.[torch-validation]'
+PYTHONPATH=. python -m unittest discover -s tests -p 'test_torch_spn_goldens.py' -v
+```
+
+The golden functions in `tests/official_spn_references.py` do not import the
+unified implementation.  Fixed-seed tests compare every iteration as well as
+effective affinity and anchor coefficients.  Integer microcases use exact
+checks where operation ordering allows; interpolated FP32 paths use
+`rtol=1e-5, atol=1e-6`.
+
+Released NLSPN and CompletionFormer repositories use DCNv2 as an implementation
+carrier for deformable gather and weighted reduction. DCNv2 is not part of the
+propagation abstraction or a dependency of this Torch model. Unit tests compare
+the independently restated official decoder and propagation formulas using the
+same fixed random inputs and parameters; no CUDA extension or downloaded
+checkpoint is involved.
+
 ## Validation chain
 
 ```text

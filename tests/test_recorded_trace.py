@@ -116,6 +116,52 @@ class TorchFunctionalCrossCheck(unittest.TestCase):
             aidx += 1
         np.testing.assert_allclose(actual, golden.numpy(), rtol=1e-5, atol=1e-5)
 
+    def test_unified_torch_matches_numpy_reference(self):
+        from spn_accel_cmodel import (
+            NormalizationMode,
+            SPNConfig,
+            compile_nlspn_plan,
+            propagate_canonical,
+        )
+        from spn_accel_cmodel.functional import propagate_once
+        from spn_accel_cmodel.torch_spn_decoded import DecodedSPNParameters
+
+        rng = np.random.default_rng(90210)
+        h, w = 5, 6
+        state = rng.normal(size=(h, w)).astype(np.float32)
+        residual_yx = rng.uniform(-0.35, 0.35, size=(8, 2, h, w)).astype(np.float32)
+        raw_affinity = rng.normal(scale=0.3, size=(8, h, w)).astype(np.float32)
+        affinity = raw_affinity / (
+            np.sum(np.abs(raw_affinity), axis=0, keepdims=True) + 1.0e-4
+        )
+        center = 1.0 - affinity.sum(axis=0, keepdims=True)
+        affinity9 = np.concatenate((affinity[:4], center, affinity[4:]), axis=0)
+
+        numpy_out = propagate_once(state, residual_yx.reshape(16, h, w), affinity9)
+        current = torch.from_numpy(state).view(1, 1, h, w)
+        config = SPNConfig.nlspn(
+            iterations=1,
+            confidence=False,
+            normalization=NormalizationMode.AS,
+        )
+        decoded = DecodedSPNParameters(
+            current=current,
+            initial=current,
+            raw_affinity=torch.from_numpy(raw_affinity).unsqueeze(0),
+            residual_offsets_yx=torch.from_numpy(residual_yx).unsqueeze(0),
+        )
+        torch_out = propagate_canonical(
+            current,
+            current,
+            compile_nlspn_plan(config, decoded),
+        )
+        np.testing.assert_allclose(
+            torch_out[0, 0].numpy(),
+            numpy_out,
+            rtol=1.0e-5,
+            atol=1.0e-6,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

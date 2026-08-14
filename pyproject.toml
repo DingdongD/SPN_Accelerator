@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 validation = ["numpy>=1.24"]
+torch-validation = ["numpy>=1.24", "torch>=2.0"]
 
 [project.scripts]
 spn-cmodel = "spn_accel_cmodel.cli:main"
